@@ -1,6 +1,6 @@
 # SOEN 387 Assignment 1
 
-Flask implementation of the Encore event service.
+A Flask implementation of the Encore event and waitlist API.
 
 ## Run
 

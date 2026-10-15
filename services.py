@@ -1,3 +1,7 @@
+import json
+from datetime import datetime, timezone
+import uuid
+
 import idempotency
 import storage
 
@@ -45,3 +49,39 @@ def get_reservation(res_id):
     if reservation is None:
         return {"error": "not_found"}, 404
     return reservation, 200
+
+
+def join_waitlist(event_id, key, body_bytes):
+    return idempotency.execute_idempotently(
+        key, body_bytes, f"POST /events/{event_id}/waitlist",
+        lambda: _perform_waitlist_join(event_id, body_bytes)
+    )
+
+
+def _perform_waitlist_join(event_id, body_bytes):
+    try:
+        body = json.loads(body_bytes)
+    except (ValueError, UnicodeDecodeError):
+        return {"error": "invalid_request"}, 422
+    if (not isinstance(body, dict) or set(body) != {"userId"}
+            or not isinstance(body["userId"], str) or not body["userId"]):
+        return {"error": "invalid_request"}, 422
+
+    event = storage.EVENTS.get(event_id)
+    if event is None:
+        return {"error": "event_not_found"}, 404
+    if event["seatsLeft"] > 0:
+        return {"error": "event_not_full"}, 409
+    entries = storage.WAITLIST.get(event_id, [])
+    if any(entry["userId"] == body["userId"] for entry in entries):
+        return {"error": "already_on_waitlist"}, 409
+
+    entry = {
+        "id": f"wl_{uuid.uuid4().hex}",
+        "eventId": event_id,
+        "userId": body["userId"],
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    }
+    entries = storage.WAITLIST.setdefault(event_id, [])
+    entries.append(entry)
+    return {**entry, "position": len(entries)}, 201

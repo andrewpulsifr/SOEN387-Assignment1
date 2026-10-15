@@ -43,3 +43,14 @@ def create_reservation(event_id):
 def get_reservation(res_id):
     body, status = services.get_reservation(res_id)
     return jsonify(body), status
+
+
+@api_routes.post("/events/<event_id>/waitlist")
+def join_waitlist(event_id):
+    key = request.headers.get("Idempotency-Key")
+    body_bytes = request.get_data() if key else b""
+    body, status, replayed = services.join_waitlist(event_id, key, body_bytes)
+    response = jsonify(body)
+    if replayed:
+        response.headers["Idempotency-Replayed"] = "true"
+    return response, status

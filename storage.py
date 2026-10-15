@@ -5,4 +5,5 @@ EVENTS = {
 }
 RESERVATIONS = {}          # id -> reservation
 IDEMPOTENCY = {}           # key -> {"request_hash": ..., "status": ..., "body": ...}
+WAITLIST = {}              # event_id -> [waitlist entry, ...] in join order
 NEXT = {"n": 1}
