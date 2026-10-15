@@ -5,7 +5,8 @@ info:
   description: >
     Campus event ticketing. v1.1 adds reservations. Additive relative to
     v1.0.0: every v1.0.0 request remains valid and every v1.0.0 response
-    shape is unchanged.
+    shape is unchanged. Waitlist and error responses may add fields; clients
+    should ignore fields they do not recognize.
 servers:
   - url: http://localhost:3000
 
@@ -62,12 +63,12 @@ paths:
       summary: Reserve one seat
       description: >
         Creates a reservation. NOT safe and not naturally idempotent, which
-        is why the Idempotency-Key header is required: a repeated request
-        carrying the same key and the same body is recognized as a repeat
-        and answered with the stored outcome of the first attempt, applied
-        exactly once. Keys are retained for at least 24 hours. A timed-out
-        caller MUST retry with the same key; retrying with a fresh key
-        creates a second reservation.
+        is why the Idempotency-Key header is required. A repeat with the same
+        global key, POST endpoint, event ID, and exact body bytes returns the
+        stored first outcome without reserving another seat. Keys are retained
+        for at least 24 hours. A timed-out caller MUST retry with the same key
+        and unchanged body bytes; a fresh key can create another reservation.
+        Reusing a key for another endpoint, event, or body returns 422.
       parameters:
         - name: eventId
           in: path
@@ -77,13 +78,11 @@ paths:
           in: header
           required: true
           description: >
-            A unique client-generated token identifying this attempt (a UUID
-            is fine). The scope of "same request" is this key plus the
-            request body.
+            A unique client-generated token for this attempt (a UUID is fine).
+            Keys share a global namespace across POST operations.
           schema:
             type: string
-            minLength: 8
-            maxLength: 128
+            minLength: 1
       requestBody:
         required: false
         content:
@@ -104,18 +103,18 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "409":
           description: >
-            No seats remain (error code sold_out). Retrying with the same
-            key returns this same outcome; retrying with a new key is
-            pointless until seats reappear. Not retryable.
+            No seats remain (error code sold_out). Retrying the same endpoint
+            and event with the same key and body bytes returns this outcome;
+            retrying with a new key is pointless until seats reappear.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "422":
           description: >
             The request is unprocessable. Error codes:
-            idempotency_key_required (add the header);
-            idempotency_key_reuse (same key sent with a different body --
-            a client bug; do not retry, investigate). Not retryable.
+            idempotency_key_required (add the header before retrying);
+            idempotency_key_reuse (the key belongs to another endpoint,
+            event, or body; use a new key for a new attempt).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -144,6 +143,191 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /events/{eventId}/waitlist:
+    post:
+      operationId: joinWaitlist
+      summary: Join an event's waitlist
+      description: >
+        Adds a person to a full event's waitlist. A person may have one active
+        entry per event. Idempotency keys are retained for at least 24 hours.
+        Repeating the same global key, POST endpoint, event ID, and exact body
+        bytes returns the stored first outcome, including errors, without
+        creating another entry. A replayed success has its original position;
+        GET returns the current position. Reusing a key for another endpoint,
+        event, or body returns idempotency_key_reuse with HTTP 422.
+      parameters:
+        - name: eventId
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/EventId"
+
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: >
+            A unique client-generated key for this join attempt. Keys share a
+            global namespace across POST operations. Retry a timed-out request
+            with the same key and exact body bytes.
+          schema:
+            type: string
+            minLength: 1
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ userId ]
+              additionalProperties: false
+              properties:
+                userId:
+                  type: string
+                  minLength: 1
+                  description: Stable identifier of the person joining the waitlist.
+
+      responses:
+        "201":
+          description: >
+            The waitlist entry was created. A repeat with the same key, endpoint,
+            event ID, and body bytes returns the stored entry and status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WaitlistEntry"
+
+        "404":
+          description: >
+            No event has this ID. Error code: event_not_found. A retry is not
+            useful unless the event ID is corrected.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+        "409":
+          description: >
+            event_not_full means seats are available; reserve a seat instead.
+            already_on_waitlist means this person already has an active entry.
+            Both outcomes are stored. The same key, endpoint, event ID, and
+            body bytes replay the stored 409, even if the event later becomes
+            full. A later join is a new request and needs a new key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+        "422":
+          description: >
+            idempotency_key_required means the header is missing.
+            idempotency_key_reuse means the key belongs to another endpoint,
+            event, or body; use a new key for a new attempt.
+            invalid_request means the body is not a JSON object containing only
+            a nonempty string userId. Correct the body and use a new key;
+            the original validation outcome is stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    get:
+      operationId: listWaitlistEntries
+      summary: List an event's waitlist entries
+      description: >
+        Returns the event's waitlist entries in first-come, first-served order.
+        Positions are one-based and reflect the current order of the waitlist.
+        A known event with no waitlist entries returns an empty entries array.
+        This operation is safe and does not change the waitlist.
+      parameters:
+        - name: eventId
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/EventId"
+      responses:
+        "200":
+          description: The event's ordered waitlist entries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WaitlistEntryList"
+
+        "404":
+          description: >
+            event_not_found: no event has this ID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /events/{eventId}/waitlist/{entryId}:
+    get:
+      operationId: getWaitlistEntry
+      summary: Fetch one waitlist entry
+      description: >
+        Returns one waitlist entry and its current one-based position in the
+        event's waitlist. This operation is safe and does not change the
+        waitlist.
+      parameters:
+        - name: eventId
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/EventId"
+        - name: entryId
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/WaitlistId"
+      responses:
+        "200":
+          description: The waitlist entry and its current position.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WaitlistEntry"
+        "404":
+          description: >
+            event_not_found means no event has this ID. entry_not_found means
+            the entry is unknown or belongs to another event.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+        operationId: leaveWaitList
+        summary: Leave an event's waitlist
+        description: >
+          Removes a waitlist entry from the specified event.
+          Remaining entries move forward to preserve first-come,
+          first-served order. This operation is not safe because
+          it changes server state, but it is idempotent because
+          repeating the deletion has no additional effect.
+        parameters:
+          - name: eventId
+            in: path
+            required: true
+            schema:
+              $ref: "#/components/schemas/EventId"
+
+          - name: entryId
+            in: path
+            required: true
+            schema:
+              $ref: "#/components/schemas/WaitlistId"
+        responses:
+          "204":
+            description: The entry was removed. No response body is returned.
+          "404":
+            description: >
+              event_not_found means no event has this ID. entry_not_found also
+              applies to an entry that has already been deleted.
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/Error"
+
 components:
   schemas:
     EventId:
@@ -153,6 +337,10 @@ components:
     ReservationId:
       type: string
       pattern: "^res_[0-9]+$"
+
+    WaitlistId:
+      type: string
+      pattern: "^wl_[A-Za-z0-9]+$"
 
     Event:
       type: object
@@ -183,15 +371,51 @@ components:
           type: string
           format: date-time
 
+    WaitlistEntry:
+      type: object
+      required: [ id, eventId, position, createdAt ]
+      additionalProperties: true
+      description: >
+        A replayed POST returns the position from its stored outcome. GET
+        responses return the entry's current position.
+      properties:
+        id: { $ref: "#/components/schemas/WaitlistId" }
+        eventId: { $ref: "#/components/schemas/EventId" }
+        position:
+          type: integer
+          minimum: 1
+          description: One-based position in the event's waitlist.
+        createdAt:
+          type: string
+          format: date-time
+
+    WaitlistEntryList:
+      type: object
+      required: [ entries ]
+      additionalProperties: true
+      properties:
+        entries:
+          type: array
+          description: Waitlist entries in first-come, first-served order.
+          items:
+            $ref: "#/components/schemas/WaitlistEntry"
+
     Error:
       type: object
       required: [error]
-      additionalProperties: false
+      additionalProperties: true
+      description: |
+        The `error` field contains a stable machine-readable code. Waitlist codes:
+        - `event_not_found` (404): the event ID is unknown. Correct the ID before retrying.
+        - `event_not_full` (409): seats are available. Reserve a seat; do not retry this join.
+        - `already_on_waitlist` (409): the person already has an active entry. Do not rejoin while it is active.
+        - `idempotency_key_required` (422): the header is missing. Add a key before retrying.
+        - `idempotency_key_reuse` (422): the key belongs to another endpoint, event, or body bytes. Use a new key for a new attempt.
+        - `invalid_request` (422): the join body must contain only a nonempty string userId. Correct the body and use a new key.
+        - `entry_not_found` (404): the entry ID is unknown or belongs to another event. Correct the ID before retrying.
+
+        Unrecognized codes are non-retryable.
       properties:
         error:
           type: string
-          description: >
-            A stable, machine-readable error code, never prose. The catalog
-            of codes, with the retryability of each, is part of this
-            contract; codes may be added over time, so consumers must treat
-            an unrecognized code as non-retryable and surface it.
+          description: A stable machine-readable error code, never prose.
