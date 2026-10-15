@@ -16,3 +16,9 @@ With the server running, use a second terminal to run:
 ```bash
 python3 tests/conformance.py
 ```
+
+Run focused idempotency checks with:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_idempotency.py' -v
+```

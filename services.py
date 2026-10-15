@@ -1,5 +1,4 @@
-import hashlib
-
+import idempotency
 import storage
 
 
@@ -18,36 +17,27 @@ def get_event(event_id):
 
 
 def create_reservation(event_id, key, body_bytes):
-    if not key:
-        return {"error": "idempotency_key_required"}, 422, False
+    return idempotency.execute_idempotently(
+        key, body_bytes, f"POST /events/{event_id}/reservations",
+        lambda: _perform_reservation(event_id)
+    )
 
-    request_hash = hashlib.sha256(body_bytes or b"").hexdigest()
-    seen = storage.IDEMPOTENCY.get(key)
-    if seen is not None:
-        if seen["request_hash"] != request_hash:
-            # Same key, different request: a client bug, and a dangerous one.
-            return {"error": "idempotency_key_reuse"}, 422, False
-        return dict(seen["body"]), seen["status"], True  # replay the stored outcome
 
-    # First time we see this key: perform the operation, then record the outcome.
+def _perform_reservation(event_id):
     event = storage.EVENTS.get(event_id)
     if event is None:
-        body, status = {"error": "not_found"}, 404
+        outcome = ({"error": "not_found"}, 404)
     elif event["seatsLeft"] <= 0:
-        body, status = {"error": "sold_out"}, 409
+        outcome = ({"error": "sold_out"}, 409)
     else:
         event["seatsLeft"] -= 1
         reservation_id = f"res_{storage.NEXT['n']}"
         storage.NEXT["n"] += 1
-        body = {"id": reservation_id, "eventId": event_id,
-                "status": "confirmed", "createdAt": "2026-09-12T19:00:00Z"}
-        storage.RESERVATIONS[reservation_id] = body
-        status = 201
-
-    storage.IDEMPOTENCY[key] = {
-        "request_hash": request_hash, "status": status, "body": dict(body)
-    }
-    return body, status, False
+        reservation = {"id": reservation_id, "eventId": event_id,
+                       "status": "confirmed", "createdAt": "2026-09-12T19:00:00Z"}
+        storage.RESERVATIONS[reservation_id] = reservation
+        outcome = (reservation, 201)
+    return outcome
 
 
 def get_reservation(res_id):
