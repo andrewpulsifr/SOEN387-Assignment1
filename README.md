@@ -1,10 +1,8 @@
 # SOEN 387 Assignment 1
 
-Encore campus ticketing service for the assignment.
+Flask implementation of the Encore event service.
 
 ## Run
-
-Install dependencies and start the service:
 
 ```bash
 python3 -m venv .venv
@@ -13,8 +11,8 @@ python3 -m pip install -r requirements.txt
 python3 app.py
 ```
 
-With the server running, open a second terminal here and run:
+With the server running, use a second terminal to run:
 
 ```bash
-python3 conformance.py
+python3 tests/conformance.py
 ```
