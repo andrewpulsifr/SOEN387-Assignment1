@@ -1,0 +1,25 @@
+# Agent guidance, skills, and working documents
+AGENTS.md
+.agents/
+.codex/
+.claude/
+docs/
+tools/
+CHECKLIST-FILE-MAP.md
+
+# Local environments and generated files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.idea/
+.DS_Store
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.journal-state/
+.env
+.env.*
+!.env.example

@@ -1,0 +1,197 @@
+openapi: 3.1.0
+info:
+  title: Encore
+  version: 1.1.0
+  description: >
+    Campus event ticketing. v1.1 adds reservations. Additive relative to
+    v1.0.0: every v1.0.0 request remains valid and every v1.0.0 response
+    shape is unchanged.
+servers:
+  - url: http://localhost:3000
+
+paths:
+  /events:
+    get:
+      operationId: listEvents
+      summary: List events
+      description: >
+        Returns events, most imminent first. Safe: calling this changes
+        nothing, and callers (including caches and crawlers) may rely on that.
+      parameters:
+        - name: bookable
+          in: query
+          required: false
+          schema: { type: boolean }
+      responses:
+        "200":
+          description: The list of events.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events]
+                properties:
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/Event" }
+
+  /events/{eventId}:
+    get:
+      operationId: getEvent
+      summary: Fetch one event
+      parameters:
+        - name: eventId
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/EventId" }
+      responses:
+        "200":
+          description: The event.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Event" }
+        "404":
+          description: No event has this id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /events/{eventId}/reservations:
+    post:
+      operationId: createReservation
+      summary: Reserve one seat
+      description: >
+        Creates a reservation. NOT safe and not naturally idempotent, which
+        is why the Idempotency-Key header is required: a repeated request
+        carrying the same key and the same body is recognized as a repeat
+        and answered with the stored outcome of the first attempt, applied
+        exactly once. Keys are retained for at least 24 hours. A timed-out
+        caller MUST retry with the same key; retrying with a fresh key
+        creates a second reservation.
+      parameters:
+        - name: eventId
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/EventId" }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: >
+            A unique client-generated token identifying this attempt (a UUID
+            is fine). The scope of "same request" is this key plus the
+            request body.
+          schema:
+            type: string
+            minLength: 8
+            maxLength: 128
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "201":
+          description: The seat is reserved; the reservation is the receipt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Reservation" }
+        "404":
+          description: No event has this id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: >
+            No seats remain (error code sold_out). Retrying with the same
+            key returns this same outcome; retrying with a new key is
+            pointless until seats reappear. Not retryable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: >
+            The request is unprocessable. Error codes:
+            idempotency_key_required (add the header);
+            idempotency_key_reuse (same key sent with a different body --
+            a client bug; do not retry, investigate). Not retryable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /reservations/{reservationId}:
+    get:
+      operationId: getReservation
+      summary: Fetch one reservation
+      description: >
+        The recovery path: a caller that lost a reply (or its idempotency
+        key) can ask what happened instead of guessing.
+      parameters:
+        - name: reservationId
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/ReservationId" }
+      responses:
+        "200":
+          description: The reservation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Reservation" }
+        "404":
+          description: No reservation has this id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+components:
+  schemas:
+    EventId:
+      type: string
+      pattern: "^ev_[0-9]+$"
+
+    ReservationId:
+      type: string
+      pattern: "^res_[0-9]+$"
+
+    Event:
+      type: object
+      required: [id, title, seatsLeft]
+      additionalProperties: false
+      properties:
+        id: { $ref: "#/components/schemas/EventId" }
+        title: { type: string, minLength: 1, maxLength: 200 }
+        seatsLeft:
+          type: integer
+          minimum: 0
+          description: >
+            Seats not yet reserved. Zero means the event is full. This field
+            is a point-in-time observation, not a promise; it may be stale by
+            the time a reservation is attempted.
+
+    Reservation:
+      type: object
+      required: [id, eventId, status, createdAt]
+      additionalProperties: false
+      properties:
+        id: { $ref: "#/components/schemas/ReservationId" }
+        eventId: { $ref: "#/components/schemas/EventId" }
+        status:
+          type: string
+          enum: [confirmed, cancelled, checked_in]
+        createdAt:
+          type: string
+          format: date-time
+
+    Error:
+      type: object
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          description: >
+            A stable, machine-readable error code, never prose. The catalog
+            of codes, with the retryability of each, is part of this
+            contract; codes may be added over time, so consumers must treat
+            an unrecognized code as non-retryable and surface it.
