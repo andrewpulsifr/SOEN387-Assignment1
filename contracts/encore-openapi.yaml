@@ -35,6 +35,13 @@ paths:
                   events:
                     type: array
                     items: { $ref: "#/components/schemas/Event" }
+        "422":
+          description: >
+            invalid_request means the bookable query parameter is not a
+            boolean. Correct the request before retrying.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /events/{eventId}:
     get:
@@ -53,6 +60,13 @@ paths:
               schema: { $ref: "#/components/schemas/Event" }
         "404":
           description: No event has this id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: >
+            invalid_request means the event ID does not satisfy the API
+            contract. Correct the request before retrying.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -114,7 +128,10 @@ paths:
             The request is unprocessable. Error codes:
             idempotency_key_required (add the header before retrying);
             idempotency_key_reuse (the key belongs to another endpoint,
-            event, or body; use a new key for a new attempt).
+            event, or body; use a new key for a new attempt);
+            invalid_request (the request violates the API contract; correct
+            it before retrying, and use a new idempotency key for a corrected
+            request when a validation outcome was stored).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -139,6 +156,13 @@ paths:
               schema: { $ref: "#/components/schemas/Reservation" }
         "404":
           description: No reservation has this id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: >
+            invalid_request means the reservation ID does not satisfy the API
+            contract. Correct the request before retrying.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -223,9 +247,13 @@ paths:
             idempotency_key_required means the header is missing.
             idempotency_key_reuse means the key belongs to another endpoint,
             event, or body; use a new key for a new attempt.
-            invalid_request means the body is not a JSON object containing only
-            a nonempty string userId. Correct the body and use a new key;
-            the original validation outcome is stored.
+            invalid_request means the event ID is malformed, the content type
+            is missing or unsupported, or the body violates the request
+            contract. The body must be a JSON object containing only a
+            nonempty string userId, with application/json content type.
+            Correct the request rather than repeating the same invalid input.
+            The validation outcome is stored and replays for the same key, so
+            use a new key for the corrected request.
           content:
             application/json:
               schema:
@@ -291,6 +319,14 @@ paths:
           description: >
             event_not_found means no event has this ID. entry_not_found means
             the entry is unknown or belongs to another event.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: >
+            invalid_request means the event ID or waitlist entry ID does not
+            satisfy the API contract. Correct the IDs before retrying.
           content:
             application/json:
               schema:
@@ -411,7 +447,7 @@ components:
         - `already_on_waitlist` (409): the person already has an active entry. Do not rejoin while it is active.
         - `idempotency_key_required` (422): the header is missing. Add a key before retrying.
         - `idempotency_key_reuse` (422): the key belongs to another endpoint, event, or body bytes. Use a new key for a new attempt.
-        - `invalid_request` (422): the join body must contain only a nonempty string userId. Correct the body and use a new key.
+        - `invalid_request` (422): a malformed path or query parameter, missing or unsupported content type, or invalid body violates the operation's request contract. Correct the request; repeating the same invalid input will not help. If a POST validation outcome was stored, use a new key for the corrected request.
         - `entry_not_found` (404): the entry ID is unknown or belongs to another event. Correct the ID before retrying.
 
         Unrecognized codes are non-retryable.

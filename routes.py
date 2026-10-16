@@ -3,8 +3,26 @@ import time
 from flask import Blueprint, jsonify, request
 
 import services
+import validation
 
 api_routes = Blueprint("api", __name__)
+
+
+@api_routes.before_request
+def validate_get_request():
+    if request.method != "GET":
+        return None
+
+    try:
+        validation.validate_request(
+            request.method,
+            request.url_rule.rule,
+            request.view_args,
+            request.args,
+        )
+    except validation.InvalidRequest:
+        return jsonify({"error": "invalid_request"}), 422
+    return None
 
 
 @api_routes.get("/events")
@@ -26,7 +44,9 @@ def get_event(event_id):
 def create_reservation(event_id):
     key = request.headers.get("Idempotency-Key")
     body_bytes = request.get_data() if key else b""
-    body, status, replayed = services.create_reservation(event_id, key, body_bytes)
+    body, status, replayed = services.create_reservation(
+        event_id, key, body_bytes, request.mimetype
+    )
 
     if not replayed and status in (201, 404, 409):
         if request.headers.get("X-Demo-Lose-Reply") == "true":
@@ -49,7 +69,9 @@ def get_reservation(res_id):
 def join_waitlist(event_id):
     key = request.headers.get("Idempotency-Key")
     body_bytes = request.get_data() if key else b""
-    body, status, replayed = services.join_waitlist(event_id, key, body_bytes)
+    body, status, replayed = services.join_waitlist(
+        event_id, key, body_bytes, request.mimetype
+    )
     response = jsonify(body)
     if replayed:
         response.headers["Idempotency-Replayed"] = "true"

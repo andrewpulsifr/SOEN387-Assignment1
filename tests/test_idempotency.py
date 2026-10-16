@@ -40,39 +40,52 @@ class IdempotencyTests(unittest.TestCase):
 
     def test_exact_bytes_replay_and_changed_bytes_reject_without_mutation(self):
         seats = storage.EVENTS['ev_101']['seatsLeft']
-        original_body = b'{"items":[1,2],"userId":"u1","count":1}'
-        first = services.create_reservation('ev_101', 'reserve-key', original_body)
-        replay = services.create_reservation('ev_101', 'reserve-key', original_body)
+        original_body = b'{}'
+        first = services.create_reservation(
+            'ev_101', 'reserve-key', original_body, 'application/json'
+        )
+        replay = services.create_reservation(
+            'ev_101', 'reserve-key', original_body, 'application/json'
+        )
         self.assertEqual(first[1:], (201, False))
         self.assertEqual(replay, (first[0], 201, True))
 
         changed_bodies = [
-            b'{ "items":[1,2],"userId":"u1","count":1}',
-            b'{"count":1,"items":[1,2],"userId":"u1"}',
-            b'{"items":[2,1],"userId":"u1","count":1}',
-            b'{"items":[1,2],"userId":"u2","count":1}',
-            b'{"items":[1,2],"userId":"u1","count":1.0}',
+            b'{ }',
+            b'{"unexpected":true}',
         ]
         for body in changed_bodies:
             with self.subTest(body=body):
                 self.assertEqual(
-                    services.create_reservation('ev_101', 'reserve-key', body),
+                    services.create_reservation(
+                        'ev_101', 'reserve-key', body, 'application/json'
+                    ),
                     ({'error': 'idempotency_key_reuse'}, 422, False),
                 )
 
-        self.assertEqual(services.create_reservation('ev_101', 'reserve-key', original_body), replay)
+        self.assertEqual(
+            services.create_reservation(
+                'ev_101', 'reserve-key', original_body, 'application/json'
+            ),
+            replay,
+        )
         self.assertEqual(storage.EVENTS['ev_101']['seatsLeft'], seats - 1)
         self.assertEqual(len(storage.RESERVATIONS), 1)
 
     def test_reservation_errors_replay_after_state_changes(self):
         for event_id, code, status in [('ev_102', 'sold_out', 409),
-                                       ('ev_unknown', 'not_found', 404)]:
+                                       ('ev_999', 'not_found', 404)]:
             with self.subTest(event_id=event_id):
-                first = services.create_reservation(event_id, event_id, b'')
-                storage.EVENTS[event_id] = {'id': event_id, 'seatsLeft': 5}
+                first = services.create_reservation(event_id, event_id, b'', None)
+                if event_id == 'ev_999':
+                    storage.EVENTS[event_id] = {'id': event_id, 'seatsLeft': 5}
+                else:
+                    storage.EVENTS[event_id]['seatsLeft'] = 5
                 self.assertEqual(first, ({'error': code}, status, False))
-                self.assertEqual(services.create_reservation(event_id, event_id, b''),
-                                 (first[0], status, True))
+                self.assertEqual(
+                    services.create_reservation(event_id, event_id, b'', None),
+                    (first[0], status, True),
+                )
         self.assertEqual(storage.RESERVATIONS, {})
 
     def test_replay_snapshot_survives_domain_and_caller_mutation(self):
@@ -119,14 +132,20 @@ class IdempotencyTests(unittest.TestCase):
                          ({}, 201, False))
 
     def test_waitlist_join_replays_original_entry_and_position(self):
-        first = services.join_waitlist('ev_102', 'join-first', b'{"userId":"alice"}')
-        second = services.join_waitlist('ev_102', 'join-second', b'{"userId":"bob"}')
+        first = services.join_waitlist(
+            'ev_102', 'join-first', b'{"userId":"alice"}', 'application/json'
+        )
+        second = services.join_waitlist(
+            'ev_102', 'join-second', b'{"userId":"bob"}', 'application/json'
+        )
         self.assertEqual(first[1:], (201, False))
         self.assertEqual(second[0]['position'], 2)
         storage.WAITLIST['ev_102'][0]['createdAt'] = 'changed'
-        self.assertEqual(services.join_waitlist('ev_102', 'join-first', b'{"userId":"alice"}'),
+        self.assertEqual(services.join_waitlist(
+                         'ev_102', 'join-first', b'{"userId":"alice"}', 'application/json'),
                          (first[0], 201, True))
-        self.assertEqual(services.join_waitlist('ev_102', 'join-first', b'{ "userId":"alice" }'),
+        self.assertEqual(services.join_waitlist(
+                         'ev_102', 'join-first', b'{ "userId":"alice" }', 'application/json'),
                          ({'error': 'idempotency_key_reuse'}, 422, False))
         self.assertEqual(len(storage.WAITLIST['ev_102']), 2)
         spec = yaml.safe_load((Path(__file__).resolve().parents[1] /
@@ -157,20 +176,27 @@ class IdempotencyTests(unittest.TestCase):
             key = f'invalid-key-{i}'
             self.assertEqual(services.join_waitlist('ev_102', key, body),
                              ({'error': 'invalid_request'}, 422, False))
-            self.assertEqual(services.join_waitlist('ev_102', key, body),
+            self.assertEqual(services.join_waitlist(
+                             'ev_102', key, body, 'application/json'),
                              ({'error': 'invalid_request'}, 422, True))
-        self.assertEqual(services.join_waitlist('ev_102', None, b'bad'),
+        self.assertEqual(services.join_waitlist(
+                         'ev_102', None, b'bad', 'application/json'),
                          ({'error': 'idempotency_key_required'}, 422, False))
         self.assertEqual(storage.WAITLIST, {})
 
     def test_global_key_reuse_across_requests_is_rejected(self):
         other_event_seats = storage.EVENTS['ev_103']['seatsLeft']
-        first = services.create_reservation('ev_101', 'global-key', b'{}')
-        self.assertEqual(services.join_waitlist('ev_102', 'global-key', b'{}'),
+        first = services.create_reservation(
+            'ev_101', 'global-key', b'{}', 'application/json'
+        )
+        self.assertEqual(services.join_waitlist(
+                         'ev_102', 'global-key', b'{}', 'application/json'),
                          ({'error': 'idempotency_key_reuse'}, 422, False))
-        self.assertEqual(services.create_reservation('ev_103', 'global-key', b'{}'),
+        self.assertEqual(services.create_reservation(
+                         'ev_103', 'global-key', b'{}', 'application/json'),
                          ({'error': 'idempotency_key_reuse'}, 422, False))
-        self.assertEqual(services.create_reservation('ev_101', 'global-key', b'{}'),
+        self.assertEqual(services.create_reservation(
+                         'ev_101', 'global-key', b'{}', 'application/json'),
                          (first[0], 201, True))
         self.assertEqual(storage.EVENTS['ev_103']['seatsLeft'], other_event_seats)
         self.assertEqual(len(storage.RESERVATIONS), 1)
@@ -195,6 +221,67 @@ class IdempotencyTests(unittest.TestCase):
         self.assertEqual(first.status_code, 201)
         self.assertEqual(replay.json, first.json)
         self.assertEqual(replay.headers['Idempotency-Replayed'], 'true')
+
+    def test_routes_validate_parameters_content_types_and_optional_bodies(self):
+        self.assertEqual(self.client.get('/events?bookable=maybe').status_code, 422)
+        self.assertEqual(self.client.get('/events/not-an-event').status_code, 422)
+        self.assertEqual(self.client.get('/reservations/not-a-reservation').status_code, 422)
+
+        reservation = self.client.post(
+            '/events/ev_101/reservations',
+            headers={'Idempotency-Key': 'optional-body'},
+        )
+        self.assertEqual(reservation.status_code, 201)
+
+        valid_waitlist = self.client.post(
+            '/events/ev_102/waitlist',
+            headers={'Idempotency-Key': 'charset-body',
+                     'Content-Type': 'application/json; charset=utf-8'},
+            data=b'{"userId":"charset-user"}',
+        )
+        self.assertEqual(valid_waitlist.status_code, 201)
+
+        for key, headers, body in [
+            ('missing-body', {'Idempotency-Key': 'missing-body'}, None),
+            ('missing-type', {'Idempotency-Key': 'missing-type'},
+             b'{"userId":"missing-type"}'),
+            ('wrong-type', {'Idempotency-Key': 'wrong-type',
+                            'Content-Type': 'text/plain'},
+             b'{"userId":"wrong-type"}'),
+            ('bad-json', {'Idempotency-Key': 'bad-json',
+                          'Content-Type': 'application/json'}, b'{'),
+        ]:
+            with self.subTest(key=key):
+                response = self.client.post(
+                    '/events/ev_102/waitlist',
+                    headers=headers,
+                    data=body,
+                )
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(response.json, {'error': 'invalid_request'})
+
+    def test_validation_errors_match_error_schema_and_replay(self):
+        response = self.client.post(
+            '/events/ev_102/waitlist',
+            headers={'Idempotency-Key': 'invalid-replay',
+                     'Content-Type': 'application/json'},
+            data=b'{"userId":""}',
+        )
+        replay = self.client.post(
+            '/events/ev_102/waitlist',
+            headers={'Idempotency-Key': 'invalid-replay',
+                     'Content-Type': 'application/json'},
+            data=b'{"userId":""}',
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(replay.status_code, 422)
+        self.assertEqual(replay.headers['Idempotency-Replayed'], 'true')
+        spec = yaml.safe_load((Path(__file__).resolve().parents[1] /
+                               'contracts/encore-openapi.yaml').read_text())
+        Draft202012Validator({
+            '$ref': '#/components/schemas/Error',
+            'components': spec['components'],
+        }).validate(response.json)
 
 
 if __name__ == '__main__':
