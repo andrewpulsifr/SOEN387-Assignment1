@@ -76,3 +76,21 @@ def join_waitlist(event_id):
     if replayed:
         response.headers["Idempotency-Replayed"] = "true"
     return response, status
+
+@api_routes.get("/events/<event_id>/waitlist")
+def get_waitlist_entries(event_id):
+    body, status = services.get_waitlist_entries(event_id)
+    return jsonify(body), status
+
+
+@api_routes.get("/events/<event_id>/waitlist/<entry_id>")
+def get_waitlist_entry_by_id(event_id, entry_id):
+    body, status = services.get_waitlist_entry_by_id(event_id, entry_id)
+    return jsonify(body), status
+
+@api_routes.delete("/events/<event_id>/waitlist/<entry_id>")
+def leave_waitlist(event_id, entry_id):
+    body, status = services.leave_waitlist(event_id, entry_id)
+    if status == 204:
+        return "", status
+    return jsonify(body), status

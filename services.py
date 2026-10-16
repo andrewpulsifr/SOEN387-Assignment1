@@ -102,12 +102,54 @@ def _perform_waitlist_join(event_id, body_bytes, content_type):
     if any(entry["userId"] == body["userId"] for entry in entries):
         return {"error": "already_on_waitlist"}, 409
 
+    # Create a new waitlist entry
     entry = {
         "id": f"wl_{uuid.uuid4().hex}",
         "eventId": event_id,
         "userId": body["userId"],
         "createdAt": datetime.now(timezone.utc).isoformat(),
     }
+
+    # Store the entry and return a copy with its position
     entries = storage.WAITLIST.setdefault(event_id, [])
     entries.append(entry)
     return {**entry, "position": len(entries)}, 201
+
+
+def get_waitlist_entries(event_id):
+    if event_id not in storage.EVENTS:
+        return {"error": "event_not_found"}, 404
+
+    # Add each entry's current position in the waitlist
+    entries = storage.WAITLIST.get(event_id, [])
+    positioned_entries = [
+        {**entry, "position": position}
+        for position, entry in enumerate(entries, start=1)
+    ]
+    return {"entries": positioned_entries}, 200
+
+def get_waitlist_entry_by_id(event_id, entry_id):
+    if event_id not in storage.EVENTS:
+        return {"error": "event_not_found"}, 404
+
+    ## Find the entry and its current position in the waitlist
+    entries = storage.WAITLIST.get(event_id, [])
+    for position, entry in enumerate(entries, start=1):
+        if entry["id"] == entry_id:
+            return {**entry, "position": position}, 200
+
+    return {"error": "entry_not_found"}, 404
+
+def leave_waitlist(event_id, entry_id):
+    if event_id not in storage.EVENTS:
+        return {"error": "event_not_found"}, 404
+
+    # No Idempotency-Key is needed for leaving the waitlist.
+    # Deleting is state-idempotent: repeating it cannot remove the entry twice.
+    entries = storage.WAITLIST.get(event_id, [])
+    for i, entry in enumerate(entries):
+        if entry["id"] == entry_id:
+            del entries[i]
+            return None, 204
+
+    return {"error": "entry_not_found"}, 404
