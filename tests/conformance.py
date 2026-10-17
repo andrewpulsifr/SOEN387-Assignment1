@@ -88,6 +88,26 @@ def t_unknown_id():
     assert status == 404, f"expected 404, got {status}"
     Draft202012Validator(schema_for("/events/{eventId}", "get", "404")).validate(body)
 
+# --------------- Event and Waitlist Listing Checks -----------------------
+
+def t_unknown_event_waitlist():
+    status, body = get("/events/ev_999/waitlist")
+    assert status == 404, f"expected 404, got {status}"
+    Draft202012Validator(
+        schema_for("/events/{eventId}/waitlist", "get", "404")
+    ).validate(body)
+    assert body["error"] == "event_not_found", \
+        f"expected event_not_found, got {body['error']}"
+
+def t_empty_event_waitlist():
+    status, body = get("/events/ev_103/waitlist")
+    assert status == 200, f"expected 200, got {status}"
+    Draft202012Validator(
+        schema_for("/events/{eventId}/waitlist", "get", "200")
+    ).validate(body)
+    assert body["entries"] == [], \
+        f"expected an empty list, got {body['entries']}"
+
 # ---------------Required waitlist checks -----------------------
 
 # 1. Successful join
@@ -436,6 +456,12 @@ if __name__ == "__main__":
     check("bookable=true filters and still matches the schema", t_bookable_filter)
     check("GET /events/{id} matches the Event schema", t_get_one)
     check("unknown id yields 404 with the Error schema", t_unknown_id)
+
+    print("Event and Waitlist Listing Checks:")
+    check("unknown event waitlist listing returns event_not_found",
+          t_unknown_event_waitlist)
+    check("empty event waitlist listing returns no entries",
+          t_empty_event_waitlist)
 
     # Required waitlist checks
     print("Core Waitlist Tests:")
