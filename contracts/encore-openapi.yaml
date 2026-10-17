@@ -288,6 +288,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "422":
+          description: >
+            invalid_request: the event ID does not match the EventId schema.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /events/{eventId}/waitlist/{entryId}:
     get:
