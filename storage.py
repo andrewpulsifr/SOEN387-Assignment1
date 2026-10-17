@@ -4,6 +4,7 @@ EVENTS = {
     "ev_103": {"id": "ev_103", "title": "Film Society: Friday Screening", "seatsLeft": 2},
 }
 RESERVATIONS = {}          # id -> reservation
-IDEMPOTENCY = {}           # key -> {"request_hash": ..., "status": ..., "body": ...}
+IDEMPOTENCY = {}           # key -> {"request_target": ..., "request_hash": ...,
+                          #          "status": ..., "body": ..., "stored_at": ...}
 WAITLIST = {}              # event_id -> [waitlist entry, ...] in join order
 NEXT = {"n": 1}
