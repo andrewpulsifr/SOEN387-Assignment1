@@ -208,14 +208,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              required: [ userId ]
-              additionalProperties: false
-              properties:
-                userId:
-                  type: string
-                  minLength: 1
-                  description: Stable identifier of the person joining the waitlist.
+              $ref: "#/components/schemas/WaitlistJoinRequest"
 
       responses:
         "201":
@@ -419,6 +412,16 @@ components:
         createdAt:
           type: string
           format: date-time
+
+    WaitlistJoinRequest:
+      type: object
+      required: [ userId ]
+      additionalProperties: false
+      properties:
+        userId:
+          type: string
+          minLength: 1
+          description: Stable identifier of the person joining the waitlist.
 
     WaitlistEntry:
       type: object
