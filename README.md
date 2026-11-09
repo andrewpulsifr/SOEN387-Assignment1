@@ -51,6 +51,24 @@ Run focused idempotency checks with:
 python3 -m unittest discover -s tests -p 'test_idempotency.py' -v
 ```
 
+Run the direct-booking domain and in-memory booking block checks with:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_booking*.py' -v
+```
+
+A booking block is one atomic operation that reads the event, allocates a
+reservation ID and saves the reservation, or leaves no trace if it fails.
+Booking adapters provide `unit_of_work()`, which opens the block and yields
+the repository used to load the event, allocate an ID, and save the booking.
+These checks run against in-memory dictionaries, so they say nothing about
+database persistence or locking.
+
+To check booking against a running server, including recovery when a reply is
+lost, run `python3 tests/direct_booking_smoke.py` once against a fresh app
+process. It uses both of ev_103's seats and one of ev_101's; restart the
+in-memory app to reset. Run the original conformance suite before it.
+
 Check the planned Hold contract and fresh-setup fixture without calling Hold
 handlers:
 
@@ -80,6 +98,17 @@ and executable setup/migration/start commands will be documented with their
 implementation; no database command is available in this prerequisite slice.
 
 ## Storage limits
+
+Direct booking uses an Event capacity rule that imports nothing, a small
+repository boundary, and an in-memory adapter over the existing dictionaries.
+The adapter is what the app runs on today. A PostgreSQL adapter is future work.
+Fresh Capacities are 42, 0, and 2, and confirmed occupancy is counted from the
+stored Reservations. The adapter writes the computed `seatsLeft` back so event
+listing, the bookable filter and the waitlist still read it, and it restores
+events, reservations and the ID counter if a booking block raises. Those
+readers keep their existing entry points and storage access. Reservations keep
+the fixed `createdAt` timestamp, so responses are unchanged. Holds and durable
+replay are future work.
 
 Events, reservations, waitlist entries, and idempotency outcomes live in process
 memory. Idempotency outcomes are lazily retained for 24 hours within the
