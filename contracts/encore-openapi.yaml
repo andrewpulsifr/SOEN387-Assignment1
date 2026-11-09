@@ -1,12 +1,19 @@
 openapi: 3.1.0
 info:
   title: Encore
-  version: 1.1.0
+  version: 1.2.0
   description: >
-    Campus event ticketing. v1.1 adds reservations. Additive relative to
-    v1.0.0: every v1.0.0 request remains valid and every v1.0.0 response
-    shape is unchanged. Waitlist and error responses may add fields; clients
-    should ignore fields they do not recognize.
+    Campus event ticketing. v1.2 specifies planned A2 Hold operations before
+    their handlers; publication is not evidence of runtime support. Existing
+    paths and schemas retain the v1.1 contract shapes. New Hold, waitlist and
+    error responses may add fields; clients should ignore unknown fields.
+    The four original event checks are preserved; full released-v1.0.0
+    equivalence remains unverified. Hold validation and recovery rules are
+    documented in this contract. Hold expiry and direct booking will share
+    availability as Capacity minus confirmed Reservations minus live Holds.
+    Missing path segments do not match these operations; router 404s are
+    outside their coded-error promises. New Hold rules do not change legacy
+    route-specific validation or error mappings.
 servers:
   - url: http://localhost:3000
 
@@ -370,8 +377,239 @@ paths:
                 schema:
                   $ref: "#/components/schemas/Error"
 
+  /events/{eventId}/holds:
+    post:
+      operationId: createHold
+      summary: Hold one available seat
+      description: |
+        Planned A2 operation; contract publication does not implement a handler.
+        Prefer hold-then-confirm for new clients; direct booking remains available.
+        The server assigns a fixed deadline using a configurable TTL (default
+        90 seconds). Reads, retries, and restart never extend it.
+
+        Idempotency-Key is required, nonempty, case-sensitive and not trimmed.
+        Whitespace-only keys are nonempty. Missing-key and key-reuse errors
+        never create or replace a binding.
+        Keys share the existing global POST namespace. Bind the key to this
+        endpoint, event ID and exact body bytes before validating input or
+        acquiring an event lock. Missing/empty key wins over every other error;
+        an existing binding then replays the original status/body or returns
+        422 idempotency_key_reuse on a target/body mismatch. A replay returns
+        the original receipt (including held status), not current Hold state.
+        Absent bytes and {} are different retry bodies. Use GET for current state.
+        Expected validation and business errors are stored with the mutation
+        atomically, durably for 24 hours from completion, including across
+        restart. At equality or later a key may begin a new attempt. This
+        window is independent of Hold expiry and indefinite resource retention.
+        Content type and query are not part of the existing target/byte binding;
+        a stored outcome takes precedence over their revalidation.
+
+        For a new binding validate, in order: EventId syntax, no query
+        parameters, content type/JSON/body, event existence, then availability.
+        Malformed IDs return 422 invalid_request; unknown valid Event IDs
+        return 404 event_not_found. Every query parameter, including duplicate
+        names, is invalid_request.
+        Zero body bytes are accepted regardless of Content-Type. Nonempty bytes
+        require application/json (media-type parameters allowed; +json is not
+        accepted) and exactly an empty JSON object. Whitespace-only, null,
+        arrays, scalars, malformed JSON, and extra properties return 422
+        invalid_request. The first applicable validation stage wins: invalid
+        options precede event lookup, and event lookup precedes capacity.
+
+        Retry only recognized transaction aborts with a bounded limit. Exhaustion
+        returns uncached 503 service_unavailable; infrastructure failures do not
+        bind a business outcome. An uncertain commit is not a confirmed rollback:
+        recover with the original key, target and bytes, or GET a known Hold.
+      parameters:
+        - name: eventId
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/EventId" }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 1 }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HoldCreateRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/HoldCreated" }
+        "404": { $ref: "#/components/responses/HoldEventNotFound" }
+        "409": { $ref: "#/components/responses/HoldSoldOut" }
+        "422": { $ref: "#/components/responses/HoldInvalidRequest" }
+        "503": { $ref: "#/components/responses/HoldServiceUnavailable" }
+
+  /holds/{holdId}:
+    get:
+      operationId: getHold
+      summary: Fetch a Hold's current effective state
+      description: |
+        Planned A2 operation. Safe read of a retained Hold, including terminal
+        Holds. Returns the current effective state, not the creation receipt.
+        A Hold is live while unconfirmed, unreleased and now < expiresAt;
+        equality is expired. Confirmed Holds remain confirmed after their former
+        deadline. Live secondsRemaining is the positive remaining time rounded
+        upward; terminal Holds return zero. No cleanup job defines expiry.
+        State and time come from one coherent observation.
+
+        Validate HoldId syntax, then reject any query parameter, then any
+        nonempty body, before lookup. These return 422 invalid_request, even
+        when the ID is unknown. An unknown well-formed ID returns 404
+        hold_not_found. No body, options or Idempotency-Key is required. A
+        supplied key is ignored; Content-Type is ignored for zero body bytes.
+      parameters:
+        - name: holdId
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/HoldId" }
+      responses:
+        "200": { $ref: "#/components/responses/HoldCurrent" }
+        "404": { $ref: "#/components/responses/HoldNotFound" }
+        "422": { $ref: "#/components/responses/HoldInvalidOptions" }
+        "503": { $ref: "#/components/responses/HoldServiceUnavailable" }
+
+    delete:
+      operationId: releaseHold
+      summary: Release a provisional allocation without deleting the Hold
+      description: |
+        Planned A2 operation. No new key or client options are required; a
+        supplied key is ignored. Validate HoldId syntax, reject any query
+        parameter, then any nonempty body, before lookup (422 invalid_request).
+        Ignore Content-Type for zero body bytes. Unknown well-formed Hold IDs
+        return 404 hold_not_found. For a known Hold, acquire its Event lock,
+        reread the Hold and sample fresh server time before the transition.
+
+        Live held -> 204, become released. Released -> 204, no further effect.
+        Expired -> 204, remain expired (expiry applies at deadline equality).
+        Confirmed -> 409 already_confirmed with reservationId, including after
+        its former deadline. GET that Reservation for recovery. DELETE cannot
+        cancel it or restore its seat. Retain all Hold records indefinitely;
+        repeat release cannot free a seat twice. No 204 response has a body.
+      parameters:
+        - name: holdId
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/HoldId" }
+      responses:
+        "204": { $ref: "#/components/responses/HoldReleased" }
+        "404": { $ref: "#/components/responses/HoldNotFound" }
+        "409": { $ref: "#/components/responses/HoldAlreadyConfirmed" }
+        "422": { $ref: "#/components/responses/HoldInvalidOptions" }
+        "503": { $ref: "#/components/responses/HoldServiceUnavailable" }
+
+  /holds/{holdId}/confirm:
+    post:
+      operationId: confirmHold
+      summary: Confirm a live Hold or recover its existing Reservation
+      description: |
+        Planned A2 operation. No new key or client options are required; a
+        supplied key is ignored. Validate HoldId syntax, reject any query
+        parameter, then any nonempty body, before lookup (422 invalid_request).
+        Ignore Content-Type for zero body bytes. Unknown well-formed Hold IDs
+        return 404 hold_not_found. Acquire the Hold's Event lock, reread the
+        Hold, then sample fresh server time immediately before the transition.
+        Waiting past the deadline fails even if the request arrived earlier.
+
+        Live held -> 201, create one separately identified linked Reservation.
+        Confirmed -> 200, return that same Reservation, even after the former
+        deadline; never return already_confirmed for this operation.
+        Released -> 409 hold_released. Expired -> 409 hold_expired, including at
+        deadline equality. Either conflict needs a new Hold and creation key.
+        Confirmation replaces a live allocation, never consuming another seat.
+        Semantic retries preserve final state and identity, not initial status.
+      parameters:
+        - name: holdId
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/HoldId" }
+      responses:
+        "201": { $ref: "#/components/responses/HoldConfirmed" }
+        "200": { $ref: "#/components/responses/HoldConfirmedAgain" }
+        "404": { $ref: "#/components/responses/HoldNotFound" }
+        "409": { $ref: "#/components/responses/HoldConfirmConflict" }
+        "422": { $ref: "#/components/responses/HoldInvalidOptions" }
+        "503": { $ref: "#/components/responses/HoldServiceUnavailable" }
+
 components:
   schemas:
+    HoldId:
+      type: string
+      minLength: 37
+      maxLength: 37
+      pattern: "^hold_[0-9a-f]{32}$"
+      description: >
+        Stable opaque server-generated ID: hold_ followed by 32 lowercase hex
+        characters generated using UUID4. Never infer state, event, or order
+        from it. Syntactically valid does not mean the Hold exists.
+
+    HoldCreateRequest:
+      type: object
+      additionalProperties: false
+      description: Empty object only; the server chooses one seat and its TTL.
+
+    HoldIdentity:
+      type: object
+      required: [id, eventId, createdAt, expiresAt]
+      additionalProperties: true
+      properties:
+        id: { $ref: "#/components/schemas/HoldId" }
+        eventId: { $ref: "#/components/schemas/EventId" }
+        createdAt: { type: string, format: date-time }
+        expiresAt:
+          type: string
+          format: date-time
+          description: Fixed deadline; expiry applies at equality, without cleanup.
+
+    HoldReceipt:
+      description: Immutable creation receipt; GET gives current effective state.
+      allOf:
+        - { $ref: "#/components/schemas/HoldIdentity" }
+        - type: object
+          required: [status]
+          additionalProperties: true
+          properties:
+            status: { type: string, const: held }
+
+    Hold:
+      description: >
+        Current effective state. Confirmed Holds include their separately
+        identified Reservation. Additional response fields are allowed.
+      allOf:
+        - { $ref: "#/components/schemas/HoldIdentity" }
+        - type: object
+          required: [status, secondsRemaining]
+          additionalProperties: true
+          properties:
+            status: { type: string, enum: [held, confirmed, released, expired] }
+            secondsRemaining: { type: integer, minimum: 0 }
+            reservationId: { $ref: "#/components/schemas/ReservationId" }
+          if:
+            properties:
+              status: { const: confirmed }
+          then:
+            required: [reservationId]
+        - if:
+            properties:
+              status: { const: held }
+          then:
+            properties:
+              secondsRemaining: { minimum: 1 }
+          else:
+            properties:
+              secondsRemaining: { const: 0 }
+
+    ConfirmedHoldError:
+      allOf:
+        - { $ref: "#/components/schemas/Error" }
+        - type: object
+          required: [reservationId]
+          additionalProperties: true
+          properties:
+            error: { const: already_confirmed }
+            reservationId: { $ref: "#/components/schemas/ReservationId" }
+
     EventId:
       type: string
       pattern: "^ev_[0-9]+$"
@@ -471,3 +709,136 @@ components:
         error:
           type: string
           description: A stable machine-readable error code, never prose.
+
+  responses:
+    HoldConfirmed:
+      description: >
+        201 first confirmation; the separately identified Reservation has
+        status confirmed. Its ID is linked from the retained Hold.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Reservation" }
+
+    HoldConfirmedAgain:
+      description: >
+        200 repeated confirmation returns the same confirmed Reservation.
+        No new Reservation or capacity change occurs.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Reservation" }
+
+    HoldReleased:
+      description: >
+        204 without a body. Live held becomes released; already released stays
+        released; expired stays expired. The Hold remains addressable.
+
+    HoldConfirmConflict:
+      description: >
+        409 hold_expired or hold_released. Create a new Hold using a new
+        creation key; this Hold cannot be renewed or confirmed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          examples:
+            expired: { value: { error: hold_expired } }
+            released: { value: { error: hold_released } }
+
+    HoldAlreadyConfirmed:
+      description: >
+        409 already_confirmed, DELETE only. Retrieve GET
+        /reservations/{reservationId} using the returned reservationId.
+        Releasing a confirmed Hold cannot cancel its Reservation.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ConfirmedHoldError" }
+          example: { error: already_confirmed, reservationId: res_1 }
+
+    HoldCurrent:
+      description: >
+        200 current Hold. GET never renews the deadline, changes state, or
+        persists an expiry marker. reservationId is required when confirmed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Hold" }
+
+    HoldNotFound:
+      description: >
+        404 hold_not_found for an unknown well-formed Hold ID. Correct the ID
+        before retrying; terminal Holds are retained and remain addressable.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: hold_not_found }
+
+    HoldInvalidOptions:
+      description: >
+        422 invalid_request for a malformed Hold ID, any query parameter or
+        any nonempty body (including {}). Correct the input before retrying.
+        No key is needed and no replay binding is consulted or written.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: invalid_request }
+
+    HoldCreated:
+      description: >
+        201 original receipt. Same-key replay preserves this status/body even
+        after confirmation, release or expiry; GET supplies the current view.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/HoldReceipt" }
+          examples:
+            created:
+              value:
+                id: hold_1234567890ab4def81234567890abcde
+                eventId: ev_103
+                status: held
+                createdAt: "2026-11-08T20:00:00Z"
+                expiresAt: "2026-11-08T20:01:30Z"
+
+    HoldEventNotFound:
+      description: >
+        404 event_not_found for an unknown well-formed Event ID. Correct the
+        ID and use a new key if the original outcome was stored.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: event_not_found }
+
+    HoldSoldOut:
+      description: >
+        409 sold_out. Confirmed Reservations plus live Holds fill Capacity.
+        Same-key retries replay this stored error even after capacity returns.
+        Do not immediately retry unchanged; a later attempt uses a new key
+        while the original binding remains valid.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: sold_out }
+
+    HoldInvalidRequest:
+      description: >
+        422 idempotency_key_required: add the missing/empty creation key.
+        idempotency_key_reuse: use a new key for a different target/body.
+        Neither response creates or replaces a binding.
+        invalid_request: correct the malformed ID, query, content type or body;
+        a stored validation outcome requires a new key for corrected input.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          examples:
+            missingKey: { value: { error: idempotency_key_required } }
+            reusedKey: { value: { error: idempotency_key_reuse } }
+            invalidInput: { value: { error: invalid_request } }
+
+    HoldServiceUnavailable:
+      description: >
+        503 service_unavailable after bounded recognized-abort retry exhaustion.
+        Never cached as a business outcome. Retry creation with the original
+        key, target and exact bytes. For confirm/release, GET then use semantic
+        retry. Lost commit acknowledgement does not prove rollback; a committed
+        prior outcome, if present, remains recoverable.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: service_unavailable }

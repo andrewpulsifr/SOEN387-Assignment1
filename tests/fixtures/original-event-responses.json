@@ -1,0 +1,59 @@
+{
+  "revision": "3314e3916ee8012c756f3941df412b2916480104",
+  "base": "http://localhost:3000",
+  "responses": {
+    "/events": {
+      "status": 200,
+      "body": {
+        "events": [
+          {
+            "id": "ev_101",
+            "seatsLeft": 42,
+            "title": "Jazz Ensemble: Fall Concert"
+          },
+          {
+            "id": "ev_102",
+            "seatsLeft": 0,
+            "title": "Improv Night"
+          },
+          {
+            "id": "ev_103",
+            "seatsLeft": 2,
+            "title": "Film Society: Friday Screening"
+          }
+        ]
+      }
+    },
+    "/events?bookable=true": {
+      "status": 200,
+      "body": {
+        "events": [
+          {
+            "id": "ev_101",
+            "seatsLeft": 42,
+            "title": "Jazz Ensemble: Fall Concert"
+          },
+          {
+            "id": "ev_103",
+            "seatsLeft": 2,
+            "title": "Film Society: Friday Screening"
+          }
+        ]
+      }
+    },
+    "/events/ev_101": {
+      "status": 200,
+      "body": {
+        "id": "ev_101",
+        "seatsLeft": 42,
+        "title": "Jazz Ensemble: Fall Concert"
+      }
+    },
+    "/events/ev_999": {
+      "status": 404,
+      "body": {
+        "error": "not_found"
+      }
+    }
+  }
+}

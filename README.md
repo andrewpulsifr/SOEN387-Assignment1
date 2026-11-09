@@ -1,6 +1,21 @@
-# SOEN 387 Assignment 1
+# SOEN 387 Encore assignments
 
 A Flask implementation of the Encore event and waitlist API.
+
+## Current implementation and Assignment 2 status
+
+Events, immediate reservations, and waitlist join/list/lookup/leave are
+implemented. The [OpenAPI contract](contracts/encore-openapi.yaml) also specifies
+planned Assignment 2 Hold operations; those handlers, PostgreSQL persistence,
+migrations, and runtime TTL configuration are not implemented yet. Contract
+tests passing does not demonstrate Hold HTTP behavior, locking, or durability.
+
+## Assignment deliverables
+
+Final Assignment 2 documents and selected captures belong in
+`deliverables/assignment2/` once produced. They remain pending, including the
+two-page design note, AI log, old/new conformance output, race script/output,
+and restart demonstration. No Assignment 2 submission ZIP has been prepared.
 
 ## Review map
 
@@ -35,6 +50,34 @@ Run focused idempotency checks with:
 ```bash
 python3 -m unittest discover -s tests -p 'test_idempotency.py' -v
 ```
+
+Check the planned Hold contract and fresh-setup fixture without calling Hold
+handlers:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_hold*.py' -v
+```
+
+Keep `tests/fixtures/` and `contracts/fixtures/` with the tests. The frozen
+v1.1.0 contract, original event-check bodies, and captured event responses
+are compatibility/test inputs; they are not additional active contracts.
+
+## Planned database setup
+
+[fresh-events.json](contracts/fixtures/fresh-events.json) is an explicit future
+seeding input, not a reset command or an existing PostgreSQL integration. It
+defines capacities 42, 0, and 2 for ev_101, ev_102, and ev_103, empty
+Reservations/Holds/waitlists/replay outcomes, and Reservation numbering from 1.
+Capacity zero deliberately represents the full event without inventing past
+bookings from remaining-seat counts.
+
+Future setup must seed only an explicitly fresh, empty database after the
+required schema exists. Normal startup must apply pending migrations, stop
+on migration failure, and preserve populated data, IDs, receipts, and deadlines.
+The test runner must own isolated disposable data. Restart demonstrations
+must reuse the populated database with seeding disabled. Database dependencies
+and executable setup/migration/start commands will be documented with their
+implementation; no database command is available in this prerequisite slice.
 
 ## Storage limits
 

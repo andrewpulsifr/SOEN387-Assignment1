@@ -1,0 +1,10 @@
+{
+  "revision": "3314e3916ee8012c756f3941df412b2916480104",
+  "source_sha256": "a73e7d83e21140ac750b8b765d4ebbccc5b987c8c5288ff1ad7dbe75d48e5260",
+  "checks": {
+    "t_list_shape": "def t_list_shape():\n    status, body = get(\"/events\")\n    assert status == 200, f\"expected 200, got {status}\"\n    Draft202012Validator(schema_for(\"/events\", \"get\", \"200\")).validate(body)",
+    "t_bookable_filter": "def t_bookable_filter():\n    status, body = get(\"/events?bookable=true\")\n    assert status == 200, f\"expected 200, got {status}\"\n    Draft202012Validator(schema_for(\"/events\", \"get\", \"200\")).validate(body)\n    assert all(e[\"seatsLeft\"] > 0 for e in body[\"events\"]), \\\n        \"bookable=true returned a full event\"",
+    "t_get_one": "def t_get_one():\n    status, body = get(\"/events/ev_101\")\n    assert status == 200, f\"expected 200, got {status}\"\n    Draft202012Validator(schema_for(\"/events/{eventId}\", \"get\", \"200\")).validate(body)",
+    "t_unknown_id": "def t_unknown_id():\n    status, body = get(\"/events/ev_999\")\n    assert status == 404, f\"expected 404, got {status}\"\n    Draft202012Validator(schema_for(\"/events/{eventId}\", \"get\", \"404\")).validate(body)"
+  }
+}
