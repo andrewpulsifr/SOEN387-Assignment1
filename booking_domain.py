@@ -19,11 +19,16 @@ class Event:
     caller, which keeps the rule free of ID generation and clocks.
     """
 
-    def __init__(self, event_id: str, capacity: int, confirmed_occupancy: int = 0):
-        """Construct an Event from explicit Capacity and confirmed occupancy."""
+    def __init__(self, event_id: str, capacity: int, confirmed_occupancy: int = 0,
+                 *, title: str = ""):
+        """Construct an Event from explicit Capacity and confirmed occupancy.
+
+        The title is carried for event responses and takes no part in the rule.
+        """
         if capacity < 0 or confirmed_occupancy < 0 or confirmed_occupancy > capacity:
             raise ValueError("Confirmed occupancy must be between zero and Capacity")
         self.id = event_id
+        self.title = title
         self._capacity = capacity
         self._confirmed_occupancy = confirmed_occupancy
 

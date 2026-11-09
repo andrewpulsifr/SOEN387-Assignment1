@@ -32,7 +32,8 @@ def schema_for(path, method, status):
 
 class IdempotencyTests(unittest.TestCase):
     def setUp(self):
-        names = ('EVENTS', 'RESERVATIONS', 'IDEMPOTENCY', 'WAITLIST', 'NEXT')
+        names = ('EVENTS', 'CAPACITIES', 'RESERVATIONS', 'IDEMPOTENCY', 'WAITLIST',
+                 'NEXT')
         self.original = {name: deepcopy(getattr(storage, name)) for name in names}
         storage.IDEMPOTENCY.clear()
         storage.RESERVATIONS.clear()
@@ -172,7 +173,7 @@ class IdempotencyTests(unittest.TestCase):
 
     # Reservation and shared-key service checks
     def test_exact_bytes_replay_and_changed_bytes_reject_without_mutation(self):
-        seats = storage.EVENTS['ev_101']['seatsLeft']
+        seats = services.get_event('ev_101')[0]['seatsLeft']
         original_body = b'{}'
 
         first = services.create_reservation(
@@ -202,7 +203,7 @@ class IdempotencyTests(unittest.TestCase):
             'ev_101', 'reserve-key', original_body, 'application/json'
         )
         self.assertEqual(replay, (first[0], 201, True))
-        self.assertEqual(storage.EVENTS['ev_101']['seatsLeft'], seats - 1)
+        self.assertEqual(services.get_event('ev_101')[0]['seatsLeft'], seats - 1)
         self.assertEqual(len(storage.RESERVATIONS), 1)
 
     def test_reservation_errors_replay_after_state_changes(self):
@@ -214,10 +215,8 @@ class IdempotencyTests(unittest.TestCase):
                 first = services.create_reservation(event_id, event_id, b'', None)
 
                 # Make a fresh request succeed so the retry must use its stored error.
-                if event_id == 'ev_999':
-                    storage.EVENTS[event_id] = {'id': event_id, 'seatsLeft': 5}
-                else:
-                    storage.EVENTS[event_id]['seatsLeft'] = 5
+                storage.EVENTS[event_id] = {'id': event_id, 'title': 'Reopened'}
+                storage.CAPACITIES[event_id] = 5
 
                 self.assertEqual(first, ({'error': code}, status, False))
 
@@ -226,7 +225,7 @@ class IdempotencyTests(unittest.TestCase):
         self.assertEqual(storage.RESERVATIONS, {})
 
     def test_global_key_reuse_across_requests_is_rejected(self):
-        other_event_seats = storage.EVENTS['ev_103']['seatsLeft']
+        other_event_seats = services.get_event('ev_103')[0]['seatsLeft']
         first = services.create_reservation(
             'ev_101', 'global-key', b'{}', 'application/json'
         )
@@ -245,7 +244,8 @@ class IdempotencyTests(unittest.TestCase):
             'ev_101', 'global-key', b'{}', 'application/json'
         )
         self.assertEqual(replay, (first[0], 201, True))
-        self.assertEqual(storage.EVENTS['ev_103']['seatsLeft'], other_event_seats)
+        self.assertEqual(services.get_event('ev_103')[0]['seatsLeft'],
+                         other_event_seats)
         self.assertEqual(len(storage.RESERVATIONS), 1)
         self.assertEqual(storage.WAITLIST, {})
 
@@ -285,7 +285,8 @@ class IdempotencyTests(unittest.TestCase):
             first = services.join_waitlist(event, key, body, 'application/json')
 
             # Change the event so a fresh join would succeed.
-            storage.EVENTS[event] = {'id': event, 'seatsLeft': 0}
+            storage.EVENTS[event] = {'id': event, 'title': 'Now full'}
+            storage.CAPACITIES[event] = 0
 
             self.assertEqual(first, ({'error': error}, status, False))
 

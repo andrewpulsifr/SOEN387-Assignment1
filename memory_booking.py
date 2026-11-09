@@ -1,78 +1,111 @@
 """In-memory implementation of the booking repository protocols.
 
-It wraps the process-local dicts in storage.py so booking code can use them
-through BookingRepository. A booking block is atomic: if it raises, the dicts
-are restored to their state at entry. State lives only in this process, with no
-database locking or durable replay. The waitlist, queue and event reads still
-use the dicts directly.
+It wraps the process-local dicts in storage.py and is the test double for the
+PostgreSQL adapter. One lock lets a single block run at a time across all
+events, and a command block that raises restores the dicts to their state at
+entry. State lives only in this process and is lost on restart.
 """
 
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
+from threading import RLock
 
 from booking_domain import Event
 from booking_repository import BookingRepository
 
 
 class MemoryBookingCommands:
-    """Booking commands and repository in one object, backed by the storage dicts.
+    """Block provider and repository in one object, backed by the storage dicts.
 
-    Callers open a block with unit_of_work() and get this same
-    object back as the repository.
+    unit_of_work() and snapshot() both yield this same object as the repository.
     """
 
     def __init__(self, events: dict[str, dict], capacities: dict[str, int],
-                 reservations: dict[str, dict], next_number: dict[str, int]):
-        """Keep references to the shared dicts. Nothing is copied, so storage.py stays the only owner of the data."""
+                 reservations: dict[str, dict], next_number: dict[str, int],
+                 waitlist: dict[str, list[dict]] | None = None):
+        """Keep references to the dicts without copying them; waitlist defaults to a new dict."""
         self.events = events
         self.capacities = capacities
         self.reservations = reservations
         self.next_number = next_number
+        self.waitlist = {} if waitlist is None else waitlist
+        self._lock = RLock()
 
     @contextmanager
     def unit_of_work(self) -> Iterator[BookingRepository]:
-        """Open an atomic booking block and yield this object as the repository.
+        """Open an atomic command block and yield this object as the repository.
 
         On success the changes stay. On any exception (including
-        KeyboardInterrupt) events, reservations and the ID counter go back to
-        their state at entry, then the exception is re-raised. Capacities are
-        never written during a booking, so they are not snapshotted.
+        KeyboardInterrupt) reservations, the ID counter and the waitlist go back
+        to their state at entry, then the exception is re-raised. Events and
+        Capacities are never written by a command, so they are not copied.
         """
-        events_before = deepcopy(self.events)
-        reservations_before = deepcopy(self.reservations)
-        next_before = self.next_number.copy()
-        try:
+        with self._lock:
+            reservations_before = deepcopy(self.reservations)
+            next_before = self.next_number.copy()
+            waitlist_before = deepcopy(self.waitlist)
+            try:
+                yield self
+            except BaseException:
+                self.reservations.clear()
+                self.reservations.update(reservations_before)
+                self.next_number.clear()
+                self.next_number.update(next_before)
+                self.waitlist.clear()
+                self.waitlist.update(waitlist_before)
+                raise
+
+    @contextmanager
+    def snapshot(self) -> Iterator[BookingRepository]:
+        """Yield this object for reads while no other block can run."""
+        with self._lock:
             yield self
-        except BaseException:
-            self.events.clear()
-            self.events.update(events_before)
-            self.reservations.clear()
-            self.reservations.update(reservations_before)
-            self.next_number.clear()
-            self.next_number.update(next_before)
-            raise
 
     def get_event(self, event_id: str) -> Event | None:
-        """Return the Event, counting occupancy from stored reservations rather than seatsLeft, or None if it does not exist."""
+        """Return the Event with occupancy counted from stored reservations, or None."""
         if event_id not in self.events:
             return None
         confirmed = sum(
             reservation["eventId"] == event_id
             for reservation in self.reservations.values()
         )
-        return Event(event_id, self.capacities[event_id], confirmed)
+        return Event(event_id, self.capacities[event_id], confirmed,
+                     title=self.events[event_id]["title"])
+
+    def get_reservation(self, reservation_id: str) -> dict[str, str] | None:
+        """Return a copy of the stored reservation, or None."""
+        reservation = self.reservations.get(reservation_id)
+        return None if reservation is None else reservation.copy()
+
+    def list_events(self) -> list[Event]:
+        """Return every Event, ordered by ID."""
+        return [event for event_id in sorted(self.events)
+                if (event := self.get_event(event_id)) is not None]
+
+    def waitlist_entries(self, event_id: str) -> list[dict[str, str]]:
+        """Return copies of the event's entries in join order."""
+        return [entry.copy() for entry in self.waitlist.get(event_id, [])]
+
+    def add_waitlist_entry(self, entry: dict[str, str]) -> None:
+        """Append a copy of the entry to its event's list."""
+        self.waitlist.setdefault(entry["eventId"], []).append(entry.copy())
+
+    def remove_waitlist_entry(self, event_id: str, entry_id: str) -> bool:
+        """Remove the entry from the event's list and return whether it existed."""
+        entries = self.waitlist.get(event_id, [])
+        for index, entry in enumerate(entries):
+            if entry["id"] == entry_id:
+                del entries[index]
+                return True
+        return False
 
     def next_reservation_id(self) -> str:
-        """Return the next res_N ID and advance the counter.
-
-        A rollback also rewinds the counter, so a failed booking does not use up an ID.
-        """
+        """Return the next res_N ID and advance the counter; a rollback rewinds it."""
         reservation_id = f"res_{self.next_number['n']}"
         self.next_number["n"] += 1
         return reservation_id
 
     def save_reservation(self, event: Event, reservation: dict[str, str]) -> None:
-        """Store a copy of the reservation and write the event's new seatsLeft for event readers."""
+        """Store a copy of the reservation."""
         self.reservations[reservation["id"]] = reservation.copy()
-        self.events[event.id]["seatsLeft"] = event.seats_left

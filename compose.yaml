@@ -1,0 +1,22 @@
+# Local PostgreSQL for the Encore API. The login is a fixed development value
+# for this throwaway container, so the port is published on 127.0.0.1 only.
+# The named volume keeps data between container restarts.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: encore
+      POSTGRES_PASSWORD: encore
+      POSTGRES_DB: encore
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - encore-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U encore -d encore"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  encore-postgres:

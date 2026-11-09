@@ -1,3 +1,10 @@
+"""Service functions behind the HTTP routes.
+
+Each returns (body, status); keyed POSTs also return whether the response was
+replayed. Commands run in one unit of work from storage.BOOKING_COMMANDS and
+reads run in one snapshot, so every response comes from one consistent state.
+"""
+
 import uuid
 from datetime import datetime, timezone
 
@@ -9,17 +16,26 @@ from booking_repository import BookingUnitOfWorkProvider
 
 
 def list_events(bookable):
-    events = list(storage.EVENTS.values())
+    """List events; bookable == "true" keeps only events with a free seat."""
+    with storage.BOOKING_COMMANDS.snapshot() as repository:
+        events = repository.list_events()
     if bookable == "true":
-        events = [e for e in events if e["seatsLeft"] > 0]
-    return {"events": events}, 200
+        events = [event for event in events if event.seats_left > 0]
+    return {"events": [_event_body(event) for event in events]}, 200
 
 
 def get_event(event_id):
-    event = storage.EVENTS.get(event_id)
+    """Return one event, or 404 not_found."""
+    with storage.BOOKING_COMMANDS.snapshot() as repository:
+        event = repository.get_event(event_id)
     if event is None:
         return {"error": "not_found"}, 404
-    return event, 200
+    return _event_body(event), 200
+
+
+def _event_body(event):
+    """Build the Event response, with seatsLeft from the domain rule."""
+    return {"id": event.id, "title": event.title, "seatsLeft": event.seats_left}
 
 
 def create_reservation(event_id, idempotency_key, body_bytes, content_type,
@@ -42,7 +58,8 @@ def _perform_reservation(event_id, body_bytes, content_type,
     Returns 422 for an invalid request, 404 for a missing event, 409 when sold
     out and 201 with the reservation otherwise. createdAt is a fixed timestamp,
     so responses keep their shape. The capacity check and the seat write share
-    one block so a database adapter can lock and commit them together.
+    one unit of work, so the PostgreSQL adapter locks the event and commits
+    both together.
     """
     # Check the request against the OpenAPI contract
     try:
@@ -71,7 +88,9 @@ def _perform_reservation(event_id, body_bytes, content_type,
 
 
 def get_reservation(reservation_id):
-    reservation = storage.RESERVATIONS.get(reservation_id)
+    """Return a stored reservation, or 404 not_found."""
+    with storage.BOOKING_COMMANDS.snapshot() as repository:
+        reservation = repository.get_reservation(reservation_id)
     if reservation is None:
         return {"error": "not_found"}, 404
     return reservation, 200
@@ -88,6 +107,13 @@ def join_waitlist(event_id, idempotency_key, body_bytes, content_type):
 
 
 def _perform_waitlist_join(event_id, body_bytes, content_type):
+    """Validate the body, then add the user to the end of a full event's waitlist.
+
+    Returns 422 invalid_request, 404 event_not_found, 409 event_not_full or
+    already_on_waitlist, or 201 with the entry and its position. The checks and
+    the insert share one unit of work, so two joins for the same user cannot
+    both pass the membership check.
+    """
     # Check the request against the OpenAPI contract
     try:
         body = validation.validate_request(
@@ -100,36 +126,43 @@ def _perform_waitlist_join(event_id, body_bytes, content_type):
     except validation.InvalidRequest:
         return {"error": "invalid_request"}, 422
 
-    # Check if the event allows joining the waitlist
-    event = storage.EVENTS.get(event_id)
-    if event is None:
-        return {"error": "event_not_found"}, 404
-    if event["seatsLeft"] > 0:
-        return {"error": "event_not_full"}, 409
-    entries = storage.WAITLIST.get(event_id, [])
-    if any(entry["userId"] == body["userId"] for entry in entries):
-        return {"error": "already_on_waitlist"}, 409
+    # Check eligibility and membership under the event's guard
+    with storage.BOOKING_COMMANDS.unit_of_work() as repository:
+        event = repository.get_event(event_id)
+        if event is None:
+            return {"error": "event_not_found"}, 404
+        if event.seats_left > 0:
+            return {"error": "event_not_full"}, 409
+        entries = repository.waitlist_entries(event_id)
+        if any(entry["userId"] == body["userId"] for entry in entries):
+            return {"error": "already_on_waitlist"}, 409
 
-    # Create a new waitlist entry
-    entry = {
-        "id": f"wl_{uuid.uuid4().hex}",
-        "eventId": event_id,
-        "userId": body["userId"],
-        "createdAt": datetime.now(timezone.utc).isoformat(),
-    }
+        # Create a new waitlist entry
+        entry = {
+            "id": f"wl_{uuid.uuid4().hex}",
+            "eventId": event_id,
+            "userId": body["userId"],
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+        }
+        repository.add_waitlist_entry(entry)
+    return {**entry, "position": len(entries) + 1}, 201
 
-    # Store the entry and return a copy with its position
-    entries = storage.WAITLIST.setdefault(event_id, [])
-    entries.append(entry)
-    return {**entry, "position": len(entries)}, 201
+
+def _read_waitlist(event_id):
+    """Return the event's entries in join order, or None if the event does not exist."""
+    with storage.BOOKING_COMMANDS.snapshot() as repository:
+        if repository.get_event(event_id) is None:
+            return None
+        return repository.waitlist_entries(event_id)
 
 
 def get_waitlist_entries(event_id):
-    if event_id not in storage.EVENTS:
+    """List the event's entries with positions from 1 in join order."""
+    entries = _read_waitlist(event_id)
+    if entries is None:
         return {"error": "event_not_found"}, 404
 
     # Add each entry's current position in the waitlist
-    entries = storage.WAITLIST.get(event_id, [])
     positioned_entries = [
         {**entry, "position": position}
         for position, entry in enumerate(entries, start=1)
@@ -137,11 +170,12 @@ def get_waitlist_entries(event_id):
     return {"entries": positioned_entries}, 200
 
 def get_waitlist_entry_by_id(event_id, entry_id):
-    if event_id not in storage.EVENTS:
+    """Return one entry with its current position, or a 404 error."""
+    entries = _read_waitlist(event_id)
+    if entries is None:
         return {"error": "event_not_found"}, 404
 
     ## Find the entry and its current position in the waitlist
-    entries = storage.WAITLIST.get(event_id, [])
     for position, entry in enumerate(entries, start=1):
         if entry["id"] == entry_id:
             return {**entry, "position": position}, 200
@@ -149,15 +183,14 @@ def get_waitlist_entry_by_id(event_id, entry_id):
     return {"error": "entry_not_found"}, 404
 
 def leave_waitlist(event_id, entry_id):
-    if event_id not in storage.EVENTS:
-        return {"error": "event_not_found"}, 404
+    """Remove an entry under the event's lock and return 204, or a 404 error.
 
-    # No Idempotency-Key is needed for leaving the waitlist.
-    # Deleting is state-idempotent: repeating it cannot remove the entry twice.
-    entries = storage.WAITLIST.get(event_id, [])
-    for i, entry in enumerate(entries):
-        if entry["id"] == entry_id:
-            del entries[i]
-            return None, 204
-
+    It needs no Idempotency-Key: repeating it cannot remove the entry twice.
+    """
+    with storage.BOOKING_COMMANDS.unit_of_work() as repository:
+        if repository.get_event(event_id) is None:
+            return {"error": "event_not_found"}, 404
+        removed = repository.remove_waitlist_entry(event_id, entry_id)
+    if removed:
+        return None, 204
     return {"error": "entry_not_found"}, 404

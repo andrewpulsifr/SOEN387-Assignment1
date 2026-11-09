@@ -1,11 +1,13 @@
-"""The storage boundary for immediate booking.
+"""The storage boundary for events, reservations and waitlists.
 
-Domain code asks a repository for an Event, a reservation ID and a place to
-save the result. Adapters own the storage details behind those three calls.
+Services ask a repository for domain Events, reservation IDs, stored
+reservations and waitlist entries. Adapters own the storage details behind
+those calls; memory_booking.py and postgres_booking.py implement them.
 
-A Unit of Work is one atomic booking block: every read, ID allocation and save
-inside it succeeds together, or the block leaves no trace. Adapters provide
-that guarantee; BookingUnitOfWorkProvider declares how to open a block.
+A Unit of Work is one atomic command block: every read, ID allocation and
+write inside it succeeds together, or the block leaves no trace. Once a block
+has loaded an event, no other command on that event runs until the block ends.
+A snapshot is a read-only block whose reads all see one consistent state.
 """
 
 from contextlib import AbstractContextManager
@@ -15,24 +17,52 @@ from booking_domain import Event
 
 
 class BookingRepository(Protocol):
-    """The three operations a booking block needs: load, allocate and save."""
+    """The operations a command or snapshot block offers the services."""
 
     def get_event(self, event_id: str) -> Event | None:
-        """Load explicit Capacity and confirmed occupancy for a booking decision."""
+        """Load an Event with its Capacity and confirmed occupancy, or None.
+
+        Inside a unit of work this also claims the event for the rest of the
+        block, so the occupancy stays current until the block ends.
+        """
         ...
 
     def next_reservation_id(self) -> str:
-        """Generate a reservation ID within the current booking block."""
+        """Allocate the next reservation ID; a rolled-back block returns it."""
         ...
 
     def save_reservation(self, event: Event, reservation: dict[str, str]) -> None:
-        """Save the domain booking and publish its shared availability together."""
+        """Store a reservation that event.book() just created."""
+        ...
+
+    def get_reservation(self, reservation_id: str) -> dict[str, str] | None:
+        """Return a copy of a stored reservation, or None."""
+        ...
+
+    def list_events(self) -> list[Event]:
+        """Load every Event with its Capacity and confirmed occupancy, ordered by ID."""
+        ...
+
+    def waitlist_entries(self, event_id: str) -> list[dict[str, str]]:
+        """Return copies of the event's waitlist entries in join order."""
+        ...
+
+    def add_waitlist_entry(self, entry: dict[str, str]) -> None:
+        """Append the entry to the end of its event's waitlist."""
+        ...
+
+    def remove_waitlist_entry(self, event_id: str, entry_id: str) -> bool:
+        """Remove the entry from the event's waitlist and return whether it existed."""
         ...
 
 
 class BookingUnitOfWorkProvider(Protocol):
-    """Open an atomic booking block and provide its repository to the service."""
+    """Open command and snapshot blocks and provide their repository."""
 
     def unit_of_work(self) -> AbstractContextManager[BookingRepository]:
-        """Open a booking block and yield the repository to use inside it."""
+        """Open a command block and yield the repository to use inside it."""
+        ...
+
+    def snapshot(self) -> AbstractContextManager[BookingRepository]:
+        """Open a read-only block whose reads all see one consistent state."""
         ...

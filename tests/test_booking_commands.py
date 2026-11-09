@@ -1,11 +1,10 @@
 """Unit tests for the in-memory booking block in memory_booking.py.
 
-Checks that MemoryBookingCommands saves a booking, publishes the new seatsLeft
-and advances the ID counter, and that an exception inside the block restores
-events, reservations and the counter. Also checks that
-services.create_reservation opens one unit_of_work() on an injected adapter and
-propagates failures. These in-memory tests do not show PostgreSQL locking or
-persistence.
+Checks that MemoryBookingCommands saves a booking and advances the ID
+counter, and that an exception inside a block restores reservations, the
+counter and the waitlist. Also checks that services.create_reservation opens
+one unit_of_work() on an injected adapter and propagates failures. These
+in-memory tests do not show PostgreSQL locking or persistence.
 
 Run from the project root:
     python3 -m unittest discover -s tests -p 'test_booking*.py' -v
@@ -27,7 +26,7 @@ class BookingCommandTests(unittest.TestCase):
 
     def setUp(self):
         """Each test owns an isolated capacity-two Event and empty booking state."""
-        self.events = {"ev_103": {"id": "ev_103", "title": "Film", "seatsLeft": 2}}
+        self.events = {"ev_103": {"id": "ev_103", "title": "Film"}}
         self.reservations: dict[str, dict] = {}
         self.next_number = {"n": 1}
         self.commands = MemoryBookingCommands(
@@ -41,8 +40,15 @@ class BookingCommandTests(unittest.TestCase):
         storage.IDEMPOTENCY.clear()
         storage.IDEMPOTENCY.update(self.original_outcomes)
 
+    def seats_left(self):
+        """Read ev_103's availability through the adapter."""
+        with self.commands.snapshot() as repository:
+            event = repository.get_event("ev_103")
+            assert event is not None
+            return event.seats_left
+
     def test_unit_of_work_persists_domain_booking_and_rehydrates_occupancy(self):
-        """Success saves the Reservation, identity sequence and shared availability."""
+        """Success saves the Reservation and ID counter; a reload has one seat fewer."""
         with self.commands.unit_of_work() as repository:
             event = repository.get_event("ev_103")
             assert event is not None
@@ -57,14 +63,13 @@ class BookingCommandTests(unittest.TestCase):
             self.assertEqual(reloaded.seats_left, 1)
             self.assertIsNone(repository.get_event("ev_999"))
             self.assertEqual(repository.next_reservation_id(), "res_2")
-        self.assertEqual(self.events["ev_103"]["seatsLeft"], 1)
         self.assertEqual(self.reservations, {"res_1": {
             "id": "res_1", "eventId": "ev_103", "status": "confirmed",
             "createdAt": "2026-11-08T20:00:00Z",
         }})
 
     def test_failed_unit_of_work_restores_booking_availability_and_identity(self):
-        """A RuntimeError after save_reservation restores events, reservations and the ID counter.
+        """A RuntimeError after save_reservation restores reservations and the ID counter.
 
         A reservation that existed before the block is left untouched.
         """
@@ -87,8 +92,22 @@ class BookingCommandTests(unittest.TestCase):
             assert reloaded is not None
             self.assertEqual(reloaded.seats_left, 2)
             self.assertEqual(repository.next_reservation_id(), "res_1")
-        self.assertEqual(self.events["ev_103"]["seatsLeft"], 2)
         self.assertEqual(self.reservations, {"res_90": existing})
+
+    def test_failed_unit_of_work_restores_the_waitlist(self):
+        """A RuntimeError after a join and a leave puts both waitlist changes back."""
+        kept = {"id": "wl_1", "eventId": "ev_103", "userId": "kept", "createdAt": "t1"}
+        self.commands.add_waitlist_entry(kept)
+        with (self.assertRaisesRegex(RuntimeError, "abort"),
+              self.commands.unit_of_work() as repository):
+            repository.add_waitlist_entry(
+                {"id": "wl_2", "eventId": "ev_103", "userId": "new", "createdAt": "t2"}
+            )
+            repository.remove_waitlist_entry("ev_103", "wl_1")
+            raise RuntimeError("abort")
+
+        with self.commands.snapshot() as repository:
+            self.assertEqual(repository.waitlist_entries("ev_103"), [kept])
 
     def test_service_uses_unit_of_work_only_adapter(self):
         """The service opens one booking block and saves the reservation."""
@@ -100,15 +119,15 @@ class BookingCommandTests(unittest.TestCase):
         )
         self.assertEqual(result[1:], (201, False))
         self.assertEqual(self.reservations, {"res_1": result[0]})
-        self.assertEqual(self.events["ev_103"]["seatsLeft"], 1)
+        self.assertEqual(self.seats_left(), 1)
         adapter.unit_of_work.assert_called_once_with()
 
     def test_unit_of_work_failure_propagates_and_preserves_state(self):
         """An error from unit_of_work() propagates unchanged and preserves booking state.
 
         The error is raised when opening the block, on entering it, and after
-        the service has written its booking. Each case leaves events,
-        reservations and the ID counter as they were.
+        the service has written its booking. Each case leaves reservations,
+        the ID counter and availability as they were.
         """
         for phase in ("open", "enter", "execute"):
             with self.subTest(phase=phase):
@@ -134,7 +153,7 @@ class BookingCommandTests(unittest.TestCase):
                 unit_of_work.assert_called_once_with()
                 self.assertEqual(self.reservations, {})
                 self.assertEqual(self.next_number, {"n": 1})
-                self.assertEqual(self.events["ev_103"]["seatsLeft"], 2)
+                self.assertEqual(self.seats_left(), 2)
 
 
 if __name__ == "__main__":
