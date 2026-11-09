@@ -2,10 +2,18 @@
 
 A Flask implementation of the Encore event and waitlist API.
 
-## Deliverables
+## Review map
 
-The Assignment 1 design note, AI-collaboration log, and test screenshot are in
-[deliverables/assignment1](deliverables/assignment1/).
+Review the root Python modules and `requirements.txt` for the application,
+`contracts/` for the active API contract and setup fixtures, `tests/` for
+executable checks and their inputs, and `deliverables/assignment2/` for final
+Assignment 2 documents and evidence once produced.
+
+`_internal/` holds local plans, policies, journals, tools, scratch work, and
+historical Assignment 1 deliverables. Exclude it from the Assignment 2 ZIP.
+Root agent instructions, `CONTEXT.md`, editor/agent configuration, `.gitignore`,
+and local environments remain at locations required by their tools. They are
+outside the grading package. The internal guide explains the archived paths.
 
 ## Run
 
