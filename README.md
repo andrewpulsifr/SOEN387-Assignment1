@@ -2,6 +2,11 @@
 
 A Flask implementation of the Encore event and waitlist API.
 
+## Deliverables
+
+The Assignment 1 design note, AI-collaboration log, and test screenshot are in
+[deliverables/assignment1](deliverables/assignment1/).
+
 ## Run
 
 ```bash
