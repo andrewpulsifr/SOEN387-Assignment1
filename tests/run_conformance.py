@@ -7,7 +7,8 @@ HTTP suites, which start app.py on a new database per test. A last section
 runs checks without HTTP: the original check bodies against their recorded
 copy, the parsed contract, and 24-hour key retention on an injected clock.
 Databases are dropped afterwards, so there is nothing to reset. The header
-records the command, revision, versions and settings.
+records the command, revision, versions and settings. tests/run_races.py
+reuses the header and test-running helpers.
 
 Run from the project root with the Compose PostgreSQL server up:
     ENCORE_TEST_DATABASE_URL=postgresql://encore:encore@localhost:5432/postgres \\
@@ -45,11 +46,11 @@ NON_HTTP_CHECKS = ["test_hold_fixtures", "test_hold_contract",
 
 def main():
     """Print the header, run every section, print a summary; return the exit status."""
-    if not ADMIN_URL:
-        print("Set ENCORE_TEST_DATABASE_URL to a PostgreSQL server URL whose user may"
-              " create databases; see the README.", file=sys.stderr)
+    if server_url_missing():
         return 2
-    print_header()
+    print_header("Encore conformance run on PostgreSQL",
+                 "90 seconds (the app.py default); expiry checks start app.py"
+                 " with ENCORE_HOLD_TTL_SECONDS=2")
 
     print("\n== Original checks: tests/conformance.py, check code unchanged ==",
           flush=True)
@@ -76,17 +77,33 @@ def main():
           f" {'passed' if smoke_passed else 'FAILED'}")
     print(f"Assignment 2 HTTP tests: {counts(http)}")
     print(f"Checks without HTTP: {counts(non_http)}")
-    tests_passed = all(result.wasSuccessful() and not result.skipped
-                       for result in (http, non_http))
+    tests_passed = passed(http) and passed(non_http)
     return 0 if original_passed and smoke_passed and tests_passed else 1
 
 
-def print_header():
-    """Print the source revision, contract, versions and settings of this run."""
+def server_url_missing():
+    """Return True, after saying how to set it, when ENCORE_TEST_DATABASE_URL is unset."""
+    if ADMIN_URL:
+        return False
+    print("Set ENCORE_TEST_DATABASE_URL to a PostgreSQL server URL whose user may"
+          " create databases; see the README.", file=sys.stderr)
+    return True
+
+
+def passed(result):
+    """Return True if every test in a unittest result ran and passed."""
+    return result.wasSuccessful() and not result.skipped
+
+
+def print_header(title, hold_ttl):
+    """Print the title, then the source revision, contract, versions and settings of this run.
+
+    hold_ttl describes the Hold lifetimes the run uses.
+    """
     contract = CONTRACT.read_bytes()
     with psycopg.connect(ADMIN_URL) as conn:
         server_version = conn.execute("SHOW server_version").fetchone()[0]
-    print("Encore conformance run on PostgreSQL")
+    print(title)
     print(f"Command: python3 {' '.join(sys.argv)}, with ENCORE_TEST_DATABASE_URL set")
     print("Expected: every check passes and the command exits with status 0")
     print(f"Source: {git('rev-parse', '--short', 'HEAD') or 'not a Git checkout'}")
@@ -98,8 +115,7 @@ def print_header():
     print(f"Python {platform.python_version()}, Flask {version('flask')},"
           f" psycopg {version('psycopg')}, jsonschema {version('jsonschema')},"
           f" PostgreSQL {server_version}")
-    print("Hold TTL: 90 seconds (the app.py default); expiry checks start app.py"
-          " with ENCORE_HOLD_TTL_SECONDS=2")
+    print(f"Hold TTL: {hold_ttl}")
     print(f"Retries: up to {idempotency.MAX_COMMAND_ATTEMPTS} attempts per command"
           " after SQLSTATE 40001 or 40P01, with no delay")
     print("Fixtures: every server runs on a new database loaded from"
@@ -114,10 +130,14 @@ def git(*args):
     return result.stdout.rstrip("\n") if result.returncode == 0 else ""
 
 
-def run_tests(names):
-    """Run the named unittest modules or tests verbosely; return the result."""
+def run_tests(names, resultclass=None):
+    """Run the named unittest modules or tests verbosely; return the result.
+
+    resultclass, if given, replaces unittest's TextTestResult.
+    """
     tests = unittest.defaultTestLoader.loadTestsFromNames(names)
-    return unittest.TextTestRunner(stream=sys.stdout, verbosity=2).run(tests)
+    return unittest.TextTestRunner(stream=sys.stdout, verbosity=2,
+                                   resultclass=resultclass).run(tests)
 
 
 def counts(result):

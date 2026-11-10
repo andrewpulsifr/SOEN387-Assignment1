@@ -2,10 +2,13 @@
 
 They send requests through the conformance helpers, so no handler code is
 imported, and check bodies against the contract's response schemas.
+run_together() sends several requests at the same moment for race tests.
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
+from threading import Barrier
 
 from conformance import get, schema_for, send
 from jsonschema import Draft202012Validator
@@ -46,6 +49,29 @@ def lifetime(hold):
 def seats_left(event_id):
     """Read the event's seatsLeft over HTTP."""
     return get(f"/events/{event_id}")[1]["seatsLeft"]
+
+
+def run_together(requests, timeout=10):
+    """Call every request at the same moment, each on its own thread; return results in order.
+
+    Each request is a function of no arguments, and a shared barrier releases
+    them together. If any request raises, or they have not all finished
+    timeout seconds after the call, this raises once the running requests
+    end, so no response goes missing.
+    """
+    start = Barrier(len(requests))
+
+    def run(request):
+        start.wait(timeout=timeout)
+        return request()
+
+    with ThreadPoolExecutor(max_workers=len(requests)) as pool:
+        pending = [pool.submit(run, request) for request in requests]
+        _, unfinished = wait(pending, timeout=timeout)
+        if unfinished:
+            raise TimeoutError(f"{len(unfinished)} of {len(requests)} requests"
+                               f" did not finish within {timeout} seconds")
+        return [future.result() for future in pending]
 
 
 def wait_until_not_held(hold_id, timeout=10):

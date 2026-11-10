@@ -15,9 +15,9 @@ with the replay outcomes of keyed requests. The
 
 Final Assignment 2 documents and selected captures belong in
 `deliverables/assignment2/`. The old/new conformance output is there as
-`conformance-run.txt`. The two-page design note, AI log, race script/output
-and restart demonstration remain pending. No Assignment 2 submission ZIP has
-been prepared.
+`conformance-run.txt`, and the race output as `race-run.txt`. The two-page
+design note, AI log and restart demonstration remain pending. No Assignment 2
+submission ZIP has been prepared.
 
 ## Review map
 
@@ -108,13 +108,15 @@ key conflicts, same-key contention, the 24-hour boundary on an injected clock,
 and abort retries), and `app.py` started as a process: replay after a restart,
 a failed migration, an invalid Hold TTL, the Hold checks in
 `tests/test_postgres_holds.py`, `tests/test_postgres_confirm.py` and
-`tests/test_postgres_release.py`, and the cross-workflow checks in
-`tests/test_postgres_cross_workflow.py`. Those send HTTP requests through the
+`tests/test_postgres_release.py`, the cross-workflow checks in
+`tests/test_postgres_cross_workflow.py`, and the race checks in
+`tests/test_postgres_races.py`. Those send HTTP requests through the
 conformance helpers and check receipts, the current view, coded errors, live
 Holds filling an event for both booking paths and the waitlist, expiry with a
 2-second TTL, first and repeated confirmation at full allocation, release
-of live, released, expired and confirmed Holds, and key binding and replay
-across all three keyed POSTs. Without
+of live, released, expired and confirmed Holds, key binding and replay
+across all three keyed POSTs, and simultaneous requests for the same seats
+(see [Race run](#race-run)). Without
 `ENCORE_TEST_DATABASE_URL` these tests are skipped.
 
 To check booking against a running server, including recovery when a reply is
@@ -155,9 +157,9 @@ GET reports the current one, and that stored booking and join outcomes replay
 unchanged while live Holds fill an event and give seats back. A last section,
 reported on its own because it does not use HTTP, compares the four original
 event check bodies with their recorded copy, checks the parsed contract, and
-checks the 24-hour key retention boundary on an injected clock. Restart,
-migration and lock-wait checks are not part of this run; the PostgreSQL
-checks above cover them.
+checks the 24-hour key retention boundary on an injected clock. Race,
+restart, migration and lock-wait checks are not part of this run; the race
+run below and the PostgreSQL checks above cover them.
 
 The header lists the command and expected result, the Git revision and any
 uncommitted files, the contract version and checksum, the Python, Flask,
@@ -181,6 +183,58 @@ extra reservation fields that the starter accepted are now rejected. That
 comparison ran against the in-memory Assignment 1 version and has not been
 repeated on PostgreSQL. Nothing shows that the starter is the released
 v1.0.0, so these runs do not establish equivalence with v1.0.0.
+
+## Race run
+
+One command runs the race checks on PostgreSQL. With the Compose server up,
+run:
+
+```bash
+ENCORE_TEST_DATABASE_URL=postgresql://encore:encore@localhost:5432/postgres \
+  python3 tests/run_races.py
+```
+
+It runs the three tests in `tests/test_postgres_races.py`. Each starts
+`app.py` on its own new database loaded from the fresh fixture, with Holds
+that last 300 seconds, so no Hold can expire during the run. A barrier sends
+each race's requests to that one server at the same moment, one thread per
+request:
+
+- Five Hold requests with different keys for ev_103, which has Capacity 2.
+  Exactly two get 201 with different Hold IDs and three get 409 `sold_out`.
+- Two Hold requests with the same key and body for ev_103's last seat, after
+  one Hold has taken the other. Both get the same 201 receipt, one of them
+  marked `Idempotency-Replayed: true`, and only one new Hold is stored.
+- A direct booking and a Hold request for ev_103's last seat, after one Hold
+  has taken the other. Whichever runs first gets 201 and the other gets 409
+  `sold_out`.
+
+After each race the test reads the reservations and Holds stored for ev_103
+and asks over HTTP whether each Hold is still live. The stored IDs must match
+the 201 responses, reservations plus live Holds must equal Capacity, and
+`seatsLeft` must be 0. A missing response, a timeout or any other status fails
+the race. Under each test the output lists every response and the final state
+of ev_103, after a header with the same run details as the conformance run.
+The command exits with status 0 only when all three races pass. A captured
+run is in
+[deliverables/assignment2/race-run.txt](deliverables/assignment2/race-run.txt).
+
+Without a lock, two requests could each count the last free seat before
+either stored its Hold or reservation, and both would succeed. Every command
+that takes a seat therefore locks the event's row with `SELECT ... FOR UPDATE`
+before it counts reservations and live Holds. The second request waits, then
+counts the first one's Hold or reservation. Two requests with one key are
+ordered earlier, by the key's row in `idempotency_outcomes`, and a Hold and
+its stored outcome commit in one transaction (see
+[Replay of keyed requests](#replay-of-keyed-requests)). A passing run covers
+the order its requests happened to run in. The locks are why no other order
+can oversell or run one key's request twice.
+
+The race run leaves out checks that need only one request at a time.
+`tests/test_postgres_cross_workflow.py` checks that a key sent again with
+another route, event or body is rejected as key reuse, and
+`tests/test_postgres_replay.py` checks that a failed command keeps neither its
+writes nor its key claim.
 
 ## Database setup
 
