@@ -14,9 +14,10 @@ with the replay outcomes of keyed requests. The
 ## Assignment deliverables
 
 Final Assignment 2 documents and selected captures belong in
-`deliverables/assignment2/` once produced. They remain pending, including the
-two-page design note, AI log, old/new conformance output, race script/output,
-and restart demonstration. No Assignment 2 submission ZIP has been prepared.
+`deliverables/assignment2/`. The old/new conformance output is there as
+`conformance-run.txt`. The two-page design note, AI log, race script/output
+and restart demonstration remain pending. No Assignment 2 submission ZIP has
+been prepared.
 
 ## Review map
 
@@ -105,13 +106,15 @@ waitlist order, rollback, ID allocation, and expiry judged after a lock wait
 for Hold creation, confirmation and release), durable replay (stored errors,
 key conflicts, same-key contention, the 24-hour boundary on an injected clock,
 and abort retries), and `app.py` started as a process: replay after a restart,
-a failed migration, an invalid Hold TTL, and the Hold checks in
+a failed migration, an invalid Hold TTL, the Hold checks in
 `tests/test_postgres_holds.py`, `tests/test_postgres_confirm.py` and
-`tests/test_postgres_release.py`. Those send HTTP requests through the
+`tests/test_postgres_release.py`, and the cross-workflow checks in
+`tests/test_postgres_cross_workflow.py`. Those send HTTP requests through the
 conformance helpers and check receipts, the current view, coded errors, live
 Holds filling an event for both booking paths and the waitlist, expiry with a
-2-second TTL, first and repeated confirmation at full allocation, and release
-of live, released, expired and confirmed Holds. Without
+2-second TTL, first and repeated confirmation at full allocation, release
+of live, released, expired and confirmed Holds, and key binding and replay
+across all three keyed POSTs. Without
 `ENCORE_TEST_DATABASE_URL` these tests are skipped.
 
 To check booking against a running server, including recovery when a reply is
@@ -128,6 +131,56 @@ python3 -m unittest discover -s tests -p 'test_hold*.py' -v
 Keep `tests/fixtures/` and `contracts/fixtures/` with the tests. The frozen
 v1.1.0 contract, original event-check bodies, and captured event responses
 are compatibility/test inputs; they are not additional active contracts.
+
+## Conformance run
+
+One command runs the API's conformance checks on PostgreSQL. With the Compose
+server up, run:
+
+```bash
+ENCORE_TEST_DATABASE_URL=postgresql://encore:encore@localhost:5432/postgres \
+  python3 tests/run_conformance.py
+```
+
+It reports the original checks apart from the Assignment 2 checks. The
+original group runs the 15 checks in `tests/conformance.py`, whose check code
+is unchanged, against `app.py` on a new database loaded from the fresh
+fixture. The Assignment 2 group runs `tests/direct_booking_smoke.py` on that same server,
+then the Hold creation, confirmation and release suites and
+`tests/test_postgres_cross_workflow.py`, where each test starts `app.py` on its
+own new database. The cross-workflow suite checks that one key stays bound to
+its first route, event and exact body bytes across all three keyed POSTs. It
+also checks that a replayed waitlist join keeps its original position while
+GET reports the current one, and that stored booking and join outcomes replay
+unchanged while live Holds fill an event and give seats back. A last section,
+reported on its own because it does not use HTTP, compares the four original
+event check bodies with their recorded copy, checks the parsed contract, and
+checks the 24-hour key retention boundary on an injected clock. Restart,
+migration and lock-wait checks are not part of this run; the PostgreSQL
+checks above cover them.
+
+The header lists the command and expected result, the Git revision and any
+uncommitted files, the contract version and checksum, the Python, Flask,
+psycopg, jsonschema and PostgreSQL versions, and the settings: Holds last 90
+seconds by default and 2 seconds in the expiry checks, and a command that hits
+a serialization failure or deadlock runs up to 3 times in all. Every database
+is dropped at the end, so there is nothing to reset. The command exits with
+status 0 only when every section passes. A captured run is in
+[deliverables/assignment2/conformance-run.txt](deliverables/assignment2/conformance-run.txt).
+
+`tests/conformance.py` and `tests/direct_booking_smoke.py` check
+`http://localhost:3000` unless `ENCORE_BASE_URL` names another address.
+
+These passes have limits as compatibility evidence. The four supplied event
+checks cover events only, and the other eleven original checks cover the
+waitlist. An Assignment 1 comparison with the course
+starter (revision `8893a46`) found two kinds of change. Reusing a key for
+another event, which the starter answered with the first event's 201, now
+returns 422 `idempotency_key_reuse`. Malformed IDs, invalid query values and
+extra reservation fields that the starter accepted are now rejected. That
+comparison ran against the in-memory Assignment 1 version and has not been
+repeated on PostgreSQL. Nothing shows that the starter is the released
+v1.0.0, so these runs do not establish equivalence with v1.0.0.
 
 ## Database setup
 

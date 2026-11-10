@@ -2,13 +2,14 @@
 # It reads contracts/encore-openapi.yaml, extracts the response schemas, and checks a
 # running implementation against them. It never imports the server's source.
 # Run from the assignment root (with a server on :3000): python3 tests/conformance.py
-import json, sys, urllib.request, urllib.error
+# Set ENCORE_BASE_URL to check a server at another address.
+import json, os, sys, urllib.request, urllib.error
 from pathlib import Path
 import yaml
 from jsonschema import Draft202012Validator
 from uuid import uuid4
 
-BASE = "http://localhost:3000"
+BASE = os.environ.get("ENCORE_BASE_URL", "http://localhost:3000")
 CONTRACT = Path(__file__).resolve().parents[1] / "contracts" / "encore-openapi.yaml"
 spec = yaml.safe_load(CONTRACT.read_text())
 

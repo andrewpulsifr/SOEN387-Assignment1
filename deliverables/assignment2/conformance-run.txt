@@ -1,0 +1,109 @@
+Encore conformance run on PostgreSQL
+Command: python3 tests/run_conformance.py, with ENCORE_TEST_DATABASE_URL set
+Expected: every check passes and the command exits with status 0
+Source: 6d74feb
+  uncommitted:  M README.md
+  uncommitted:  M tests/conformance.py
+  uncommitted:  M tests/direct_booking_smoke.py
+  uncommitted:  M tests/postgres_support.py
+  uncommitted: ?? tests/run_conformance.py
+  uncommitted: ?? tests/test_postgres_cross_workflow.py
+Contract: contracts/encore-openapi.yaml version 1.2.0, SHA-256 edc541a03ae9a516a9529e494b80be67f474022336f5af4cdaab651e2eb353f7
+Python 3.13.5, Flask 3.1.3, psycopg 3.3.8, jsonschema 4.26.0, PostgreSQL 17.11 (Debian 17.11-1.pgdg13+2)
+Hold TTL: 90 seconds (the app.py default); expiry checks start app.py with ENCORE_HOLD_TTL_SECONDS=2
+Retries: up to 3 attempts per command after SQLSTATE 40001 or 40P01, with no delay
+Fixtures: every server runs on a new database loaded from contracts/fixtures/fresh-events.json, dropped afterwards
+
+== Original checks: tests/conformance.py, check code unchanged ==
+Conformance run against http://127.0.0.1:55802
+  PASS  GET /events matches the contract's response schema
+  PASS  bookable=true filters and still matches the schema
+  PASS  GET /events/{id} matches the Event schema
+  PASS  unknown id yields 404 with the Error schema
+Event and Waitlist Listing Checks:
+  PASS  unknown event waitlist listing returns event_not_found
+  PASS  empty event waitlist listing returns no entries
+Core Waitlist Tests:
+  PASS  Successful join of waitlist
+  PASS  same-key retry replays without duplication
+  PASS  joining an event with available seats returns event_not_full
+  PASS  unknown waitlist entry returns entry_not_found
+Additional Waitlist Tests:
+  PASS  same key with a different body returns idempotency_key_reuse
+  PASS  missing key returns idempotency_key_required
+  PASS  joining an unknown event returns event_not_found
+  PASS  same-key retry replays stored already_on_waitlist error
+Waitlist Lifecycle Tests:
+  PASS  listing, retrieval, deletion, and repositioning
+15/15 passed
+
+== Assignment 2 checks ==
+-- Direct booking smoke check, on the same server --
+PASS: booking statuses, strict DTO/GET, filter/queue, reply-loss/replay, IDs
+{"replayed": {"createdAt": "2026-09-12T19:00:00Z", "eventId": "ev_101", "id": "res_3", "status": "confirmed"}, "results": [[201, {"createdAt": "2026-09-12T19:00:00Z", "eventId": "ev_103", "id": "res_1", "status": "confirmed"}], [201, {"createdAt": "2026-09-12T19:00:00Z", "eventId": "ev_103", "id": "res_2", "status": "confirmed"}], [409, {"error": "sold_out"}], [404, {"error": "not_found"}], [422, {"error": "invalid_request"}]]}
+
+-- Hold and cross-workflow HTTP checks, one new database per test --
+test_create_and_inspect_with_absent_body_or_empty_object (test_postgres_holds.HoldHttpTests.test_create_and_inspect_with_absent_body_or_empty_object)
+Both valid bodies hold a seat; replay repeats the receipt; GET shows the countdown. ... ok
+test_expiry_restores_availability_at_once_and_replay_never_renews (test_postgres_holds.HoldHttpTests.test_expiry_restores_availability_at_once_and_replay_never_renews)
+With a 2-second TTL, expiry frees ev_103 for every reader and both booking paths. ... ok
+test_invalid_requests_return_coded_errors_without_holding_a_seat (test_postgres_holds.HoldHttpTests.test_invalid_requests_return_coded_errors_without_holding_a_seat)
+Missing keys, options, bad bodies, queries and unknown IDs follow the contract. ... ok
+test_live_holds_fill_the_event_for_both_booking_paths_and_the_waitlist (test_postgres_holds.HoldHttpTests.test_live_holds_fill_the_event_for_both_booking_paths_and_the_waitlist)
+Two live Holds use ev_103's Capacity: holds and bookings sell out, joins open. ... ok
+test_aborted_confirmation_retries_then_returns_uncached_503 (test_postgres_confirm.ConfirmHttpTests.test_aborted_confirmation_retries_then_returns_uncached_503)
+After the last abort: 503 and a still-live Hold; confirming again succeeds. ... ok
+test_expired_holds_fail_and_confirmation_outlasts_the_deadline (test_postgres_confirm.ConfirmHttpTests.test_expired_holds_fail_and_confirmation_outlasts_the_deadline)
+With a 2-second TTL, the unconfirmed Hold expires; the confirmed one stays confirmed. ... ok
+test_first_confirm_creates_one_linked_reservation_and_repeats_return_it (test_postgres_confirm.ConfirmHttpTests.test_first_confirm_creates_one_linked_reservation_and_repeats_return_it)
+At full allocation: 201 then 200 with one Reservation; no seat changes hands. ... ok
+test_unknown_or_malformed_confirms_return_coded_errors_without_change (test_postgres_confirm.ConfirmHttpTests.test_unknown_or_malformed_confirms_return_coded_errors_without_change)
+An unknown ID gives 404; a malformed ID, query or body gives 422 first. ... ok
+test_aborted_release_retries_then_returns_uncached_503 (test_postgres_release.ReleaseHttpTests.test_aborted_release_retries_then_returns_uncached_503)
+After the last abort: 503 and a still-held Hold; releasing again frees the seat. ... ok
+test_expired_holds_stay_expired_and_confirmed_holds_keep_their_reservation (test_postgres_release.ReleaseHttpTests.test_expired_holds_stay_expired_and_confirmed_holds_keep_their_reservation)
+With a 2-second TTL: expired DELETE is 204 and relabels nothing; confirmed is 409. ... ok
+test_release_frees_one_seat_and_repeats_free_none (test_postgres_release.ReleaseHttpTests.test_release_frees_one_seat_and_repeats_free_none)
+At full allocation: 204 frees one seat; repeats, with or without a key, free none. ... ok
+test_unknown_or_malformed_releases_return_coded_errors_without_change (test_postgres_release.ReleaseHttpTests.test_unknown_or_malformed_releases_return_coded_errors_without_change)
+An unknown ID gives 404; a malformed ID, query or body gives 422 first. ... ok
+test_a_join_replay_keeps_its_creation_position_while_get_shows_the_current_one (test_postgres_cross_workflow.CrossWorkflowHttpTests.test_a_join_replay_keeps_its_creation_position_while_get_shows_the_current_one)
+After ana leaves ev_102, bob's GET says 1, his replay still says 2, and ana stays out. ... ok
+test_a_key_stays_bound_to_its_first_route_and_event (test_postgres_cross_workflow.CrossWorkflowHttpTests.test_a_key_stays_bound_to_its_first_route_and_event)
+The same bytes sent to any other route or event are key reuse; the first replays. ... ok
+test_other_body_bytes_are_key_reuse_even_when_the_json_is_equivalent (test_postgres_cross_workflow.CrossWorkflowHttpTests.test_other_body_bytes_are_key_reuse_even_when_the_json_is_equivalent)
+Absent and {} differ, and so do {} and { }; the first request still replays. ... ok
+test_stored_outcomes_replay_unchanged_while_holds_fill_and_free_the_event (test_postgres_cross_workflow.CrossWorkflowHttpTests.test_stored_outcomes_replay_unchanged_while_holds_fill_and_free_the_event)
+With a 2-second TTL on ev_103 (Capacity 2), replays ignore the seats taken and returned. ... ok
+
+----------------------------------------------------------------------
+Ran 16 tests in 16.130s
+
+OK
+
+== Not HTTP: original check bodies, the parsed contract, and 24-hour key retention on an injected clock ==
+test_explicit_capacity_preserves_original_availability_without_booking_history (test_hold_fixtures.HoldFixtureTests.test_explicit_capacity_preserves_original_availability_without_booking_history)
+Fresh Capacity explains seatsLeft without inventing Reservations. ... ok
+test_original_four_event_check_bodies_are_unchanged (test_hold_fixtures.HoldFixtureTests.test_original_four_event_check_bodies_are_unchanged)
+Preserve supplied checks byte for byte rather than rewriting expectations. ... ok
+test_component_references_examples_and_legacy_contract_are_valid (test_hold_contract.HoldContractTests.test_component_references_examples_and_legacy_contract_are_valid)
+Add Hold routes without changing legacy operation or schema contracts. ... ok
+test_creation_accepts_only_an_optional_empty_object_and_returns_receipt (test_hold_contract.HoldContractTests.test_creation_accepts_only_an_optional_empty_object_and_returns_receipt)
+A Hold allocates one seat with no client-controlled booking options. ... ok
+test_current_view_exposes_effective_state_countdown_and_confirmation_link (test_hold_contract.HoldContractTests.test_current_view_exposes_effective_state_countdown_and_confirmation_link)
+GET represents current lifecycle state rather than replayed creation. ... ok
+test_terminal_operations_preserve_reservation_shape_and_release_recovery (test_hold_contract.HoldContractTests.test_terminal_operations_preserve_reservation_shape_and_release_recovery)
+Confirmation and release expose every accepted status and recovery code. ... ok
+test_binding_expires_24_hours_after_completion (test_postgres_replay.PostgresReplayTests.test_binding_expires_24_hours_after_completion)
+One second before expiry it replays; at equality another binding may start. ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.126s
+
+OK
+
+== Summary ==
+Original checks: passed
+Assignment 2 direct booking smoke check: passed
+Assignment 2 HTTP tests: 16 run, 0 failed, 0 errors, 0 skipped
+Checks without HTTP: 7 run, 0 failed, 0 errors, 0 skipped

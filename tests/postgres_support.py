@@ -1,12 +1,13 @@
-"""Disposable PostgreSQL databases for tests that need a real server.
+"""Disposable PostgreSQL databases, and app.py running on them, for tests.
 
 Set ENCORE_TEST_DATABASE_URL to a server URL whose user may create
-databases, for example the Compose server's postgres database. Each test
-gets a new empty database, which is dropped afterwards. Without the variable,
-these tests are skipped. Test cases here either call the service functions on
-that database or start app.py on it and send HTTP requests. A test can also
-make chosen row writes, such as reservation INSERTs or Hold UPDATEs, fail
-with a chosen SQLSTATE to exercise retries.
+databases, for example the Compose server's postgres database; without it
+these tests are skipped. Each test gets a new empty database, dropped
+afterwards, and either calls the service functions on it or starts app.py on
+it and sends HTTP requests. tests/run_conformance.py starts app.py the same
+way through serving_app(). A test can also make chosen row writes, such as
+reservation INSERTs or Hold UPDATEs, fail with a chosen SQLSTATE to exercise
+retries.
 """
 
 import os
@@ -106,50 +107,74 @@ def free_port():
         return probe.getsockname()[1]
 
 
+def app_command(port, *args):
+    """Build the app.py command line for this port plus extra arguments."""
+    return [sys.executable, str(APP), "--port", str(port), *args]
+
+
+def app_env(database_url, env=None):
+    """Return the environment that points app.py at database_url.
+
+    env adds or overrides variables, such as ENCORE_HOLD_TTL_SECONDS.
+    """
+    return {**os.environ, "ENCORE_DATABASE_URL": database_url, **(env or {})}
+
+
+@contextmanager
+def serving_app(database_url, *args, env=None):
+    """Start app.py on database_url and a free port, and kill it afterwards.
+
+    Yields the app's base URL once it answers GET /events. Raises
+    AssertionError if the app exits first or does not answer within 15 seconds.
+    """
+    port = free_port()
+    base = f"http://127.0.0.1:{port}"
+    process = subprocess.Popen(app_command(port, *args), env=app_env(database_url, env),
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    assert process.stdout is not None
+    output = process.stdout
+    try:
+        deadline = time.monotonic() + 15
+        while True:
+            if process.poll() is not None:
+                raise AssertionError(f"app exited early:\n{output.read().decode()}")
+            try:
+                urllib.request.urlopen(base + "/events", timeout=1).close()
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise AssertionError("app did not start serving within 15 seconds")
+                time.sleep(0.1)
+        yield base
+    finally:
+        process.kill()
+        process.wait(timeout=5)
+        output.close()
+
+
 class AppOnPostgresTestCase(PostgresTestCase):
     """Start app.py as a process on this test's database and talk to it over HTTP."""
 
     def app_command(self, *args):
         """Build the app.py command line for self.port plus extra arguments."""
-        return [sys.executable, str(APP), "--port", str(self.port), *args]
+        return app_command(self.port, *args)
 
     def app_env(self, env=None):
         """Return the environment that points app.py at the test database.
 
         env adds or overrides variables, such as ENCORE_HOLD_TTL_SECONDS.
         """
-        return {**os.environ, "ENCORE_DATABASE_URL": self.database_url, **(env or {})}
+        return app_env(self.database_url, env)
 
     @contextmanager
     def running_app(self, *args, env=None):
-        """Start app.py, wait until it serves requests, and kill it afterwards.
+        """Start app.py on the test database and kill it after the block.
 
         Inside the block the conformance helpers send requests to this app.
         """
-        self.port = free_port()
-        base = f"http://127.0.0.1:{self.port}"
-        process = subprocess.Popen(self.app_command(*args), env=self.app_env(env),
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        assert process.stdout is not None
-        output = process.stdout
-        try:
-            deadline = time.monotonic() + 15
-            while True:
-                if process.poll() is not None:
-                    self.fail(f"app exited early:\n{output.read().decode()}")
-                try:
-                    urllib.request.urlopen(base + "/events", timeout=1).close()
-                    break
-                except OSError:
-                    if time.monotonic() > deadline:
-                        self.fail("app did not start serving within 15 seconds")
-                    time.sleep(0.1)
-            with patch.object(conformance, "BASE", base):
-                yield
-        finally:
-            process.kill()
-            process.wait(timeout=5)
-            output.close()
+        with (serving_app(self.database_url, *args, env=env) as base,
+              patch.object(conformance, "BASE", base)):
+            yield
 
 
 class ServicesOnPostgresTestCase(PostgresTestCase):

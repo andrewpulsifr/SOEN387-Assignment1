@@ -4,12 +4,14 @@ Books ev_103 until it sells out and checks the 201, 409, 404 and 422
 responses, schema conformance, and the seatsLeft, bookable filter and waitlist
 effects. Then books ev_101 with the reply dropped (X-Demo-Lose-Reply) and
 retries with the same Idempotency-Key: the retry must return the original
-reservation with Idempotency-Replayed: true. The app keeps state in memory, so
-this does not test PostgreSQL locking or persistence.
+reservation with Idempotency-Replayed: true. Requests run one at a time, so
+this does not test locking.
 
-Run once against a fresh app, after the original conformance suite:
+Run once on freshly seeded data, after the original conformance suite, as
+tests/run_conformance.py does:
     python3 tests/direct_booking_smoke.py
-It uses both ev_103 seats and one ev_101 seat. Restart the app to reset.
+It books both ev_103 seats and one ev_101 seat, which stay booked, so a second
+run needs a fresh database. Set ENCORE_BASE_URL to check another address.
 """
 
 import json
