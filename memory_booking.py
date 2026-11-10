@@ -1,15 +1,17 @@
 """In-memory implementation of the booking repository protocols.
 
-It wraps the process-local dicts in storage.py and is the test double for the
-PostgreSQL adapter. One lock lets a single block run at a time across all
-events, and a command block that raises restores the dicts to their state at
-entry. State lives only in this process and is lost on restart.
+It wraps the process-local dicts in storage.py, including the stored replay
+outcomes, and is the test double for the PostgreSQL adapter. One lock lets a
+single block run at a time across all events and keys, and a command block
+that raises restores the dicts to their state at entry. State lives only in
+this process and is lost on restart. It never raises TransactionAborted.
 """
 
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from threading import RLock
+from typing import Any
 
 from booking_domain import Event
 from booking_repository import BookingRepository
@@ -23,13 +25,19 @@ class MemoryBookingCommands:
 
     def __init__(self, events: dict[str, dict], capacities: dict[str, int],
                  reservations: dict[str, dict], next_number: dict[str, int],
-                 waitlist: dict[str, list[dict]] | None = None):
-        """Keep references to the dicts without copying them; waitlist defaults to a new dict."""
+                 waitlist: dict[str, list[dict]] | None = None,
+                 outcomes: dict[str, dict] | None = None):
+        """Keep references to the dicts without copying them.
+
+        waitlist and outcomes (idempotency key -> stored outcome) default to
+        new dicts.
+        """
         self.events = events
         self.capacities = capacities
         self.reservations = reservations
         self.next_number = next_number
         self.waitlist = {} if waitlist is None else waitlist
+        self.outcomes = {} if outcomes is None else outcomes
         self._lock = RLock()
 
     @contextmanager
@@ -37,14 +45,16 @@ class MemoryBookingCommands:
         """Open an atomic command block and yield this object as the repository.
 
         On success the changes stay. On any exception (including
-        KeyboardInterrupt) reservations, the ID counter and the waitlist go back
-        to their state at entry, then the exception is re-raised. Events and
-        Capacities are never written by a command, so they are not copied.
+        KeyboardInterrupt) reservations, the ID counter, the waitlist and the
+        stored outcomes go back to their state at entry, then the exception is
+        re-raised. Events and Capacities are never written by a command, so
+        they are not copied.
         """
         with self._lock:
             reservations_before = deepcopy(self.reservations)
             next_before = self.next_number.copy()
             waitlist_before = deepcopy(self.waitlist)
+            outcomes_before = deepcopy(self.outcomes)
             try:
                 yield self
             except BaseException:
@@ -54,6 +64,8 @@ class MemoryBookingCommands:
                 self.next_number.update(next_before)
                 self.waitlist.clear()
                 self.waitlist.update(waitlist_before)
+                self.outcomes.clear()
+                self.outcomes.update(outcomes_before)
                 raise
 
     @contextmanager
@@ -109,3 +121,16 @@ class MemoryBookingCommands:
     def save_reservation(self, event: Event, reservation: dict[str, str]) -> None:
         """Store a copy of the reservation."""
         self.reservations[reservation["id"]] = reservation.copy()
+
+    def claim_key(self, key: str, request_target: str,
+                  request_hash: str) -> dict[str, Any] | None:
+        """Return a copy of the key's stored outcome, or None if it has none.
+
+        The block's lock already keeps every other command out, so a free key
+        needs no placeholder record.
+        """
+        return deepcopy(self.outcomes.get(key))
+
+    def save_outcome(self, key: str, outcome: dict[str, Any]) -> None:
+        """Store a copy of the outcome under the key."""
+        self.outcomes[key] = deepcopy(outcome)

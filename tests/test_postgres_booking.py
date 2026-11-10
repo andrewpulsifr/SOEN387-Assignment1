@@ -15,33 +15,14 @@ from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import psycopg
-from postgres_support import PostgresTestCase, requires_postgres
+from postgres_support import ServicesOnPostgresTestCase, requires_postgres
 
-import migrate
 import services
-import storage
 from postgres_booking import PostgresBookingCommands
-
-PROCESS_MEMORY = (storage.IDEMPOTENCY, storage.RESERVATIONS, storage.WAITLIST)
 
 
 @requires_postgres
-class PostgresBookingTests(PostgresTestCase):
-    def setUp(self):
-        """Migrate and seed a fresh database, then point the services at it."""
-        super().setUp()
-        migrate.migrate(self.database_url)
-        migrate.seed_fresh(self.database_url, migrate.FRESH_FIXTURE)
-        for store in PROCESS_MEMORY:
-            isolated = patch.dict(store, clear=True)
-            isolated.start()
-            self.addCleanup(isolated.stop)
-        adapter = patch.object(
-            storage, "BOOKING_COMMANDS", PostgresBookingCommands(self.database_url)
-        )
-        adapter.start()
-        self.addCleanup(adapter.stop)
-
+class PostgresBookingTests(ServicesOnPostgresTestCase):
     def reserve(self, event_id):
         """Book one seat with a new idempotency key."""
         return services.create_reservation(event_id, str(uuid4()), b"", None)

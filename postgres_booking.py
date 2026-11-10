@@ -2,8 +2,9 @@
 
 Each block opens its own connection; there is no connection pool.
 unit_of_work() is one transaction that commits when the block ends normally
-and rolls back if it raises. Inside it, get_event() locks the event row until
-the transaction ends, so commands on the same event run one at a time.
+and rolls back if it raises. Inside it, get_event() locks the event row and
+claim_key() locks the key's idempotency_outcomes row until the transaction
+ends, so commands on the same event or key run one at a time.
 snapshot() is a read-only REPEATABLE READ transaction, so every read in it
 sees the same committed state.
 """
@@ -13,9 +14,14 @@ from contextlib import contextmanager
 from typing import Any
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from booking_domain import Event
-from booking_repository import BookingRepository
+from booking_repository import BookingRepository, TransactionAborted
+
+_OUTCOME_FIELDS = ("request_target", "request_hash", "status", "body", "completed_at")
+_RECOGNIZED_ABORTS = (psycopg.errors.SerializationFailure,
+                      psycopg.errors.DeadlockDetected)
 
 
 class PostgresBookingCommands:
@@ -27,9 +33,19 @@ class PostgresBookingCommands:
 
     @contextmanager
     def unit_of_work(self) -> Iterator[BookingRepository]:
-        """Run the block in one transaction that locks each event it loads."""
-        with psycopg.connect(self.conninfo) as conn:
-            yield _PostgresRepository(conn, lock_events=True)
+        """Run the block in one transaction that locks each event it loads.
+
+        A serialization failure (SQLSTATE 40001) or detected deadlock (40P01),
+        from a statement or from COMMIT, becomes TransactionAborted: PostgreSQL
+        has rolled the whole transaction back. Every other error, including a
+        connection lost during COMMIT, propagates unchanged, because the
+        outcome of the transaction may be unknown.
+        """
+        try:
+            with psycopg.connect(self.conninfo) as conn:
+                yield _PostgresRepository(conn, lock_events=True)
+        except _RECOGNIZED_ABORTS as error:
+            raise TransactionAborted(error.sqlstate) from error
 
     @contextmanager
     def snapshot(self) -> Iterator[BookingRepository]:
@@ -131,6 +147,42 @@ class _PostgresRepository:
             (event_id, entry_id),
         )
         return cursor.rowcount == 1
+
+    def claim_key(self, key: str, request_target: str,
+                  request_hash: str) -> dict[str, Any] | None:
+        """Insert a placeholder row for a free key, or lock and return the stored one.
+
+        The key's primary key decides ownership: a same-key INSERT in another
+        transaction waits until this one ends, then finds the committed row.
+        The placeholder has no outcome; save_outcome() fills it before commit.
+        """
+        # 1. Try to own the key. If another transaction holds it, this blocks
+        #    until that transaction commits or rolls back.
+        claimed = self._conn.execute(
+            "INSERT INTO idempotency_outcomes (key, request_target, request_hash)"
+            " VALUES (%s, %s, %s) ON CONFLICT (key) DO NOTHING RETURNING key",
+            (key, request_target, request_hash),
+        ).fetchone()
+        # Row returned: we own the key, so the caller runs the command.
+        if claimed is not None:
+            return None
+        # 2. Key already stored: lock its row and return it for replay.
+        row = self._conn.execute(
+            "SELECT request_target, request_hash, status, body, completed_at"
+            " FROM idempotency_outcomes WHERE key = %s FOR UPDATE",
+            (key,),
+        ).fetchone()
+        assert row is not None
+        return dict(zip(_OUTCOME_FIELDS, row))
+
+    def save_outcome(self, key: str, outcome: dict[str, Any]) -> None:
+        """Write the outcome into the key's row, replacing the placeholder or an old one."""
+        self._conn.execute(
+            "UPDATE idempotency_outcomes SET request_target = %s, request_hash = %s,"
+            " status = %s, body = %s, completed_at = %s WHERE key = %s",
+            (outcome["request_target"], outcome["request_hash"], outcome["status"],
+             Jsonb(outcome["body"]), outcome["completed_at"], key),
+        )
 
     def _scalar(self, query: Any, params: tuple) -> Any:
         """Run a query that always returns one row and return its first column."""

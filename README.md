@@ -5,10 +5,10 @@ A Flask implementation of the Encore event and waitlist API.
 ## Current implementation and Assignment 2 status
 
 Events, immediate reservations, and waitlist join/list/lookup/leave are
-implemented and stored in PostgreSQL. The
-[OpenAPI contract](contracts/encore-openapi.yaml) also specifies planned
-Assignment 2 Hold operations; those handlers, durable replay of keyed requests,
-and runtime TTL configuration are not implemented yet. Contract tests passing
+implemented and stored in PostgreSQL, together with the replay outcomes of
+keyed requests. The [OpenAPI contract](contracts/encore-openapi.yaml) also
+specifies planned Assignment 2 Hold operations; those handlers and runtime TTL
+configuration are not implemented yet. Contract tests passing
 does not demonstrate Hold HTTP behavior.
 
 ## Assignment deliverables
@@ -96,8 +96,10 @@ ENCORE_TEST_DATABASE_URL=postgresql://encore:encore@localhost:5432/postgres \
 
 Each test creates its own database on that server and drops it afterwards.
 They cover the migration runner, the PostgreSQL adapter through the service
-functions (row locking, waitlist order, rollback and ID allocation), and
-`app.py` started as a process, including a restart and a failed migration.
+functions (row locking, waitlist order, rollback and ID allocation), durable
+replay (stored errors, key conflicts, same-key contention, the 24-hour
+boundary on an injected clock, and abort retries), and `app.py` started as a
+process, including replay after a restart and a failed migration.
 Without `ENCORE_TEST_DATABASE_URL` these tests are skipped.
 
 To check booking against a running server, including recovery when a reply is
@@ -156,9 +158,32 @@ services to PostgreSQL, while other launchers such as `flask run` skip both
 steps and serve from memory.
 Every reservation has the fixed `createdAt` value `2026-09-12T19:00:00Z`.
 
-Idempotency outcomes live in process memory for 24 hours. A restart
-clears them, and separate server processes do not share them. After a
-restart, a retry with the same key runs again: a reservation retry books
-another seat if one is free, and a waitlist join retry returns
-`already_on_waitlist`. The `idempotency_outcomes` table exists for durable
-replay but is not used yet. Holds are future work.
+## Replay of keyed requests
+
+`POST /events/{eventId}/reservations` and `POST /events/{eventId}/waitlist`
+store their outcome, including expected errors such as `sold_out` and
+`invalid_request`, in the `idempotency_outcomes` table. Each request runs in
+one transaction. It first claims its key with
+`INSERT ... ON CONFLICT (key) DO NOTHING`, or locks the key's existing row,
+before it locks any event. Then it either replays the stored outcome, rejects
+a different endpoint, event or body with `idempotency_key_reuse`, or does the
+work and saves the outcome. The booking or join and its outcome commit
+together, so a crash cannot keep one without the other. A second request with
+the same key waits on the key's row and then replays the first outcome.
+
+An outcome stays replayable for 24 hours after its request completed, measured
+on the API process's UTC clock, and survives a restart. At 24 hours or later
+the key starts a new attempt. Missing-key and key-reuse errors are never
+stored.
+
+A transaction that PostgreSQL aborts with a serialization failure (SQLSTATE
+`40001`) or a detected deadlock (`40P01`) has been rolled back completely, so
+the whole request runs again, up to 3 attempts in all with no delay. After the
+third abort the API returns 503 `service_unavailable` and stores nothing;
+the client should retry with the same key, endpoint and body bytes. Every other
+database error, including a connection lost during commit, is not retried and
+returns a server error, because the work may or may not have committed. The
+client recovers the same way: the same key replays the outcome if the work
+committed, or runs it once if it did not. No statement, lock or connection
+timeout is set. The v1.1 operation entries in the contract do not list the 503
+response yet. Holds are future work.

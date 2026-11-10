@@ -9,10 +9,15 @@ these tests are skipped.
 import os
 import unittest
 import uuid
+from unittest.mock import patch
 
 import psycopg
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+import migrate
+import storage
+from postgres_booking import PostgresBookingCommands
 
 ADMIN_URL = os.environ.get("ENCORE_TEST_DATABASE_URL", "")
 
@@ -52,3 +57,30 @@ class PostgresTestCase(unittest.TestCase):
         """Run one read query in its own connection and return all rows."""
         with psycopg.connect(self.database_url) as conn:
             return conn.execute(statement, params).fetchall()
+
+    def execute(self, statement):
+        """Run SQL without parameters in its own committed transaction."""
+        with psycopg.connect(self.database_url) as conn:
+            conn.execute(statement)
+
+
+class ServicesOnPostgresTestCase(PostgresTestCase):
+    """Run the service functions on a migrated, freshly seeded database.
+
+    Process-memory stores in storage.py start empty and are restored after
+    each test, so only the database can carry state between calls.
+    """
+
+    def setUp(self):
+        """Migrate and seed the database, then point the services at it."""
+        super().setUp()
+        migrate.migrate(self.database_url)
+        migrate.seed_fresh(self.database_url, migrate.FRESH_FIXTURE)
+        for store in (storage.IDEMPOTENCY, storage.RESERVATIONS, storage.WAITLIST):
+            isolated = patch.dict(store, clear=True)
+            isolated.start()
+            self.addCleanup(isolated.stop)
+        self.commands = PostgresBookingCommands(self.database_url)
+        adapter = patch.object(storage, "BOOKING_COMMANDS", self.commands)
+        adapter.start()
+        self.addCleanup(adapter.stop)

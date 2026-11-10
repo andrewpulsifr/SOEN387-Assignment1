@@ -28,6 +28,11 @@ def get(path):
         return err.code, json.load(err)
 
 def post(path, body, key=None):
+    status, response_body, _ = post_with_headers(path, body, key)
+    return status, response_body
+
+def post_with_headers(path, body, key=None):
+    """POST like post(), and also return the response headers."""
     headers = {"Content-Type": "application/json"}
     if key is not None:
         headers["Idempotency-Key"] = key
@@ -40,9 +45,9 @@ def post(path, body, key=None):
     )
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
-            return response.status, json.load(response)
+            return response.status, json.load(response), response.headers
     except urllib.error.HTTPError as error:
-        return error.code, json.load(error)
+        return error.code, json.load(error), error.headers
 
 def delete(path):
     request = urllib.request.Request(BASE + path, method="DELETE")

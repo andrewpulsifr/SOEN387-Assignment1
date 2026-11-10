@@ -1,7 +1,13 @@
-"""Focused checks for idempotency, reservation and waitlist services, and routes."""
+"""Focused checks for idempotency, reservation and waitlist services, and routes.
+
+They run on the in-memory adapter, so they show replay rules and response
+shapes but not PostgreSQL durability or locking; test_postgres_replay.py
+covers those.
+"""
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier
 import time
@@ -61,14 +67,14 @@ class IdempotencyTests(unittest.TestCase):
         domain = {'nested': {'position': 1}}
 
         first = idempotency.execute_idempotently(
-            'snapshot-key', b'', 'test operation', lambda: (domain, 201)
+            'snapshot-key', b'', 'test operation', lambda _: (domain, 201)
         )
 
         # Changing a returned body must not change the stored snapshot.
         first[0]['nested']['position'] = 20
 
         replay = idempotency.execute_idempotently(
-            'snapshot-key', b'', 'test operation', lambda: self.fail()
+            'snapshot-key', b'', 'test operation', lambda _: self.fail()
         )
         self.assertEqual(replay, ({'nested': {'position': 1}}, 201, True))
 
@@ -76,7 +82,7 @@ class IdempotencyTests(unittest.TestCase):
         replay[0]['nested']['position'] = 30
 
         replay = idempotency.execute_idempotently(
-            'snapshot-key', b'', 'test operation', lambda: self.fail()
+            'snapshot-key', b'', 'test operation', lambda _: self.fail()
         )
         self.assertEqual(replay, ({'nested': {'position': 1}}, 201, True))
 
@@ -86,24 +92,24 @@ class IdempotencyTests(unittest.TestCase):
 
         class FakeClock:
             def __init__(self):
-                self.current = 0
+                self.current = datetime(2026, 11, 9, tzinfo=timezone.utc)
 
             def __call__(self):
                 return self.current
 
             def advance(self, seconds):
-                self.current += seconds
+                self.current += timedelta(seconds=seconds)
 
         clock = FakeClock()
 
-        def operation():
+        def operation(_):
             calls.append(len(calls) + 1)
 
             # Retention starts after this operation finishes.
             clock.advance(10)
             return {'attempt': calls[-1]}, 201
 
-        with patch('idempotency.monotonic', new=clock):
+        with patch('idempotency.utc_now', new=clock):
             first = idempotency.execute_idempotently(
                 'expiring-key', b'{}', 'test operation', operation
             )
@@ -140,7 +146,7 @@ class IdempotencyTests(unittest.TestCase):
         barrier = Barrier(8)
         calls = []
 
-        def operation():
+        def operation(_):
             calls.append(True)
             time.sleep(0.02)
             return {'id': 'one'}, 201
@@ -158,7 +164,7 @@ class IdempotencyTests(unittest.TestCase):
         self.assertTrue(all(result[:2] == ({'id': 'one'}, 201) for result in results))
 
     def test_exception_propagates_and_releases_lock(self):
-        def fail():
+        def fail(_):
             raise RuntimeError('unexpected')
 
         with self.assertRaisesRegex(RuntimeError, 'unexpected'):
@@ -167,7 +173,7 @@ class IdempotencyTests(unittest.TestCase):
             )
         self.assertNotIn('exception-key', storage.IDEMPOTENCY)
         result = idempotency.execute_idempotently(
-            'exception-key', b'', 'test operation', lambda: ({}, 201)
+            'exception-key', b'', 'test operation', lambda _: ({}, 201)
         )
         self.assertEqual(result, ({}, 201, False))
 

@@ -1,9 +1,9 @@
 """Start the API as a process on PostgreSQL, stop it, and start it again.
 
-Checks over HTTP that reservations, waitlist order and reservation numbering
-survive a killed process, that --seed-fresh leaves a populated database alone,
-and that a failed migration stops startup and leaves no partial schema.
-Idempotency replay is not checked here; it is still kept in process memory.
+Checks over HTTP that reservations, waitlist order, reservation numbering and
+stored replay outcomes survive a killed process, that --seed-fresh leaves a
+populated database alone, and that a failed migration stops startup and
+leaves no partial schema.
 
 Run from the project root with ENCORE_TEST_DATABASE_URL set:
     python3 -m unittest discover -s tests -p 'test_postgres_startup.py' -v
@@ -23,7 +23,7 @@ from uuid import uuid4
 
 import conformance
 import psycopg
-from conformance import delete, get, post
+from conformance import delete, get, post, post_with_headers
 from postgres_support import PostgresTestCase, requires_postgres
 
 APP = Path(__file__).resolve().parents[1] / "app.py"
@@ -80,10 +80,10 @@ class StartupTests(PostgresTestCase):
                     str(uuid4()))
 
     def test_bookings_queue_order_and_ids_survive_a_killed_process(self):
+        keys = [str(uuid4()) for _ in range(3)]
         with self.running_app("--seed-fresh"):
-            first = post("/events/ev_103/reservations", b"{}", str(uuid4()))
-            second = post("/events/ev_103/reservations", b"{}", str(uuid4()))
-            sold_out = post("/events/ev_103/reservations", b"{}", str(uuid4()))
+            first, second, sold_out = (post("/events/ev_103/reservations", b"{}", key)
+                                       for key in keys)
             (_, alice), (_, bob), (_, carol) = (self.join(user)
                                                 for user in ("alice", "bob", "carol"))
             self.assertEqual(delete(f"/events/ev_102/waitlist/{bob['id']}"), 204)
@@ -98,6 +98,11 @@ class StartupTests(PostgresTestCase):
                 self.assertEqual(get("/events/ev_102/waitlist"), (200, {"entries": [
                     {**alice, "position": 1}, {**carol, "position": 2},
                 ]}))
+                for key, original in zip(keys, (first, second, sold_out)):
+                    status, body, headers = post_with_headers(
+                        "/events/ev_103/reservations", b"{}", key)
+                    self.assertEqual((status, body), original)
+                    self.assertEqual(headers["Idempotency-Replayed"], "true")
 
         with self.running_app():
             third = post("/events/ev_101/reservations", b"{}", str(uuid4()))

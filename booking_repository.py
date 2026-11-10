@@ -1,19 +1,29 @@
-"""The storage boundary for events, reservations and waitlists.
+"""The storage boundary for events, reservations, waitlists and replay outcomes.
 
 Services ask a repository for domain Events, reservation IDs, stored
-reservations and waitlist entries. Adapters own the storage details behind
-those calls; memory_booking.py and postgres_booking.py implement them.
+reservations, waitlist entries and the stored outcomes of keyed POST requests.
+Adapters own the storage details behind those calls; memory_booking.py and
+postgres_booking.py implement them.
 
 A Unit of Work is one atomic command block: every read, ID allocation and
 write inside it succeeds together, or the block leaves no trace. Once a block
-has loaded an event, no other command on that event runs until the block ends.
-A snapshot is a read-only block whose reads all see one consistent state.
+has loaded an event or claimed an idempotency key, no other command on that
+event or key runs until the block ends. A snapshot is a read-only block whose
+reads all see one consistent state.
 """
 
 from contextlib import AbstractContextManager
-from typing import Protocol
+from typing import Any, Protocol
 
 from booking_domain import Event
+
+
+class TransactionAborted(Exception):
+    """A unit of work was rolled back by a recognized retryable abort.
+
+    Adapters raise it only when the storage confirms the whole block rolled
+    back, so the caller may run the command again from the start.
+    """
 
 
 class BookingRepository(Protocol):
@@ -53,6 +63,21 @@ class BookingRepository(Protocol):
 
     def remove_waitlist_entry(self, event_id: str, entry_id: str) -> bool:
         """Remove the entry from the event's waitlist and return whether it existed."""
+        ...
+
+    def claim_key(self, key: str, request_target: str,
+                  request_hash: str) -> dict[str, Any] | None:
+        """Claim an idempotency key, or return a copy of the outcome stored under it.
+
+        None means the key was free and is now claimed for this request. Either
+        way, a same-key command elsewhere waits until this block ends. The
+        stored outcome has request_target, request_hash, status, body and
+        completed_at; the caller decides whether it has expired.
+        """
+        ...
+
+    def save_outcome(self, key: str, outcome: dict[str, Any]) -> None:
+        """Store a copy of the outcome under the claimed key, replacing any old one."""
         ...
 
 

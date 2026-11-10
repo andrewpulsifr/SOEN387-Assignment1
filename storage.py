@@ -1,7 +1,8 @@
 """Process memory and the adapter the services use.
 
-The dicts hold the fresh fixture for the in-memory adapter and the
-process-local idempotency outcomes, which a restart clears.
+The dicts hold the fresh fixture and the state of the in-memory adapter,
+including its idempotency outcomes, which a restart clears. The app started
+with python3 app.py stores all of this in PostgreSQL instead.
 """
 
 from booking_repository import BookingUnitOfWorkProvider
@@ -14,7 +15,7 @@ EVENTS: dict[str, dict] = {
 }
 RESERVATIONS: dict[str, dict] = {}  # id -> reservation
 IDEMPOTENCY: dict[str, dict] = {}   # key -> {"request_target": ..., "request_hash": ...,
-                          #          "status": ..., "body": ..., "stored_at": ...}
+                          #          "status": ..., "body": ..., "completed_at": ...}
 WAITLIST: dict[str, list[dict]] = {}  # event_id -> entries in join order
 NEXT = {"n": 1}
 
@@ -26,5 +27,5 @@ CAPACITIES = {"ev_101": 42, "ev_102": 0, "ev_103": 2}
 # The adapter the services use. It starts on the in-memory dicts above, which
 # tests use directly; app.main() replaces it with the PostgreSQL adapter.
 BOOKING_COMMANDS: BookingUnitOfWorkProvider = MemoryBookingCommands(
-    EVENTS, CAPACITIES, RESERVATIONS, NEXT, WAITLIST
+    EVENTS, CAPACITIES, RESERVATIONS, NEXT, WAITLIST, IDEMPOTENCY
 )

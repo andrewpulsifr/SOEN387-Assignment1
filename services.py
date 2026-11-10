@@ -11,8 +11,7 @@ from datetime import datetime, timezone
 import idempotency
 import storage
 import validation
-from booking_domain import SoldOut
-from booking_repository import BookingUnitOfWorkProvider
+from booking_repository import BookingRepository, BookingUnitOfWorkProvider
 
 
 def list_events(bookable):
@@ -44,22 +43,24 @@ def create_reservation(event_id, idempotency_key, body_bytes, content_type,
 
     `commands` is the booking adapter, defaulting to storage.BOOKING_COMMANDS.
     """
-    commands = storage.BOOKING_COMMANDS if commands is None else commands
     return idempotency.execute_idempotently(
         idempotency_key, body_bytes, f"POST /events/{event_id}/reservations",
-        lambda: _perform_reservation(event_id, body_bytes, content_type, commands)
+        lambda repository: _perform_reservation(
+            repository, event_id, body_bytes, content_type
+        ),
+        commands,
     )
 
 
-def _perform_reservation(event_id, body_bytes, content_type,
-                         commands: BookingUnitOfWorkProvider):
-    """Validate the request, then book one seat in a single booking block.
+def _perform_reservation(repository: BookingRepository, event_id, body_bytes,
+                         content_type):
+    """Validate the request, then book one seat in the caller's unit of work.
 
     Returns 422 for an invalid request, 404 for a missing event, 409 when sold
     out and 201 with the reservation otherwise. createdAt is a fixed timestamp,
-    so responses keep their shape. The capacity check and the seat write share
-    one unit of work, so the PostgreSQL adapter locks the event and commits
-    both together.
+    so responses keep their shape. The capacity check, the seat write and the
+    saved outcome share one unit of work, so the PostgreSQL adapter locks the
+    event and commits all of them together.
     """
     # Check the request against the OpenAPI contract
     try:
@@ -73,18 +74,18 @@ def _perform_reservation(event_id, body_bytes, content_type,
     except validation.InvalidRequest:
         return {"error": "invalid_request"}, 422
 
-    try:
-        with commands.unit_of_work() as repository:
-            event = repository.get_event(event_id)
-            if event is None:
-                return {"error": "not_found"}, 404
-            reservation = event.book(
-                repository.next_reservation_id(), "2026-09-12T19:00:00Z"
-            )
-            repository.save_reservation(event, reservation)
-        return reservation, 201
-    except SoldOut:
+    event = repository.get_event(event_id)
+    if event is None:
+        return {"error": "not_found"}, 404
+    # The sold_out outcome commits with its replay record, so check before
+    # taking a reservation number that the commit would otherwise use up.
+    if event.seats_left == 0:
         return {"error": "sold_out"}, 409
+    reservation = event.book(
+        repository.next_reservation_id(), "2026-09-12T19:00:00Z"
+    )
+    repository.save_reservation(event, reservation)
+    return reservation, 201
 
 
 def get_reservation(reservation_id):
@@ -96,17 +97,22 @@ def get_reservation(reservation_id):
     return reservation, 200
 
 
-# Prevent repeated requests from creating duplicate waitlist entries
 def join_waitlist(event_id, idempotency_key, body_bytes, content_type):
+    """Join the waitlist, replaying the stored response for a repeated request.
+
+    The join and its saved outcome commit together, so a retry with the same
+    key cannot create a second entry.
+    """
     return idempotency.execute_idempotently(
         idempotency_key, body_bytes, f"POST /events/{event_id}/waitlist",
-        lambda: _perform_waitlist_join(
-            event_id, body_bytes, content_type
+        lambda repository: _perform_waitlist_join(
+            repository, event_id, body_bytes, content_type
         )
     )
 
 
-def _perform_waitlist_join(event_id, body_bytes, content_type):
+def _perform_waitlist_join(repository: BookingRepository, event_id, body_bytes,
+                           content_type):
     """Validate the body, then add the user to the end of a full event's waitlist.
 
     Returns 422 invalid_request, 404 event_not_found, 409 event_not_full or
@@ -127,24 +133,23 @@ def _perform_waitlist_join(event_id, body_bytes, content_type):
         return {"error": "invalid_request"}, 422
 
     # Check eligibility and membership under the event's guard
-    with storage.BOOKING_COMMANDS.unit_of_work() as repository:
-        event = repository.get_event(event_id)
-        if event is None:
-            return {"error": "event_not_found"}, 404
-        if event.seats_left > 0:
-            return {"error": "event_not_full"}, 409
-        entries = repository.waitlist_entries(event_id)
-        if any(entry["userId"] == body["userId"] for entry in entries):
-            return {"error": "already_on_waitlist"}, 409
+    event = repository.get_event(event_id)
+    if event is None:
+        return {"error": "event_not_found"}, 404
+    if event.seats_left > 0:
+        return {"error": "event_not_full"}, 409
+    entries = repository.waitlist_entries(event_id)
+    if any(entry["userId"] == body["userId"] for entry in entries):
+        return {"error": "already_on_waitlist"}, 409
 
-        # Create a new waitlist entry
-        entry = {
-            "id": f"wl_{uuid.uuid4().hex}",
-            "eventId": event_id,
-            "userId": body["userId"],
-            "createdAt": datetime.now(timezone.utc).isoformat(),
-        }
-        repository.add_waitlist_entry(entry)
+    # Create a new waitlist entry
+    entry = {
+        "id": f"wl_{uuid.uuid4().hex}",
+        "eventId": event_id,
+        "userId": body["userId"],
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    }
+    repository.add_waitlist_entry(entry)
     return {**entry, "position": len(entries) + 1}, 201
 
 

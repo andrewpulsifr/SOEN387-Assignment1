@@ -1,58 +1,86 @@
-"""Replay saved outcomes from the single-process, in-memory service.
+"""Replay saved outcomes of keyed POST requests.
 
-Keys share one global namespace. Records expire lazily after 24 hours while
-the process stays running. A restart clears them. The lock coordinates threads
-in this process only.
+Keys share one global namespace. Each keyed command runs in one unit of work
+from the booking adapter: claiming the key, the operation's writes and the
+saved outcome commit together or not at all. The key is claimed before the
+operation locks any event. Outcomes stay replayable for 24 hours after the
+operation completes, measured on this process's UTC clock, and survive
+restarts on PostgreSQL.
+
+A command that the adapter reports as TransactionAborted runs again from the
+start, up to MAX_COMMAND_ATTEMPTS times in all, with no delay between attempts.
+After the last abort the caller gets 503 service_unavailable, and nothing is
+stored, so the same key can be retried. Other errors propagate on the first
+attempt.
 """
 
-from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 import hashlib
-from threading import Lock
-from time import monotonic
 
 import storage
+from booking_repository import BookingUnitOfWorkProvider, TransactionAborted
 
-_OPERATION_LOCK = Lock()
-IDEMPOTENCY_RETENTION_SECONDS = 24 * 60 * 60
+IDEMPOTENCY_RETENTION = timedelta(hours=24)
+MAX_COMMAND_ATTEMPTS = 3
 
 
-def execute_idempotently(key, body_bytes, request_target, operation):
-    """Replay a saved outcome for the same key, target, and request body.
+def utc_now():
+    """Return the current UTC time, the clock that retention is measured on."""
+    return datetime.now(timezone.utc)
 
-    The callback returns expected errors as (body, status), so the helper saves
-    them with successful responses. Unexpected exceptions propagate without a
-    record. A callback may leave partial changes before raising, so a retry can
-    run it again. Callbacks must not invoke this helper recursively.
 
-    The replay flag is diagnostic and may be exposed as Idempotency-Replayed.
-    Outcomes are lazily expired when their key reaches the 24-hour retention
-    window. The in-memory store clears on restart.
+def execute_idempotently(key, body_bytes, request_target, operation,
+                         commands: BookingUnitOfWorkProvider | None = None):
+    """Run a keyed command once, or replay its saved outcome; return (body, status, replayed).
+
+    A live outcome with the same target and exact body bytes is replayed, and
+    a live outcome for another target or body gives 422 idempotency_key_reuse.
+    Both checks happen before operation runs, and neither changes the stored
+    outcome. A missing key gives 422 idempotency_key_required and stores nothing.
+
+    operation(repository) runs inside the unit of work and returns expected
+    errors as (body, status), so they are saved like successes. An exception
+    from it rolls back the whole block, including the key claim, and
+    propagates. Retries and 503 follow the module rules. `commands` defaults
+    to storage.BOOKING_COMMANDS.
     """
     if not key:
         return {"error": "idempotency_key_required"}, 422, False
 
-    request_digest = hashlib.sha256(body_bytes).hexdigest()
-    # Serialize the idempotency lookup and update to prevent duplicate execution.
-    with _OPERATION_LOCK:
-        seen = storage.IDEMPOTENCY.get(key)
-        if seen is not None:
-            if monotonic() - seen["stored_at"] >= IDEMPOTENCY_RETENTION_SECONDS:
-                del storage.IDEMPOTENCY[key]
-                seen = None
-        if seen is not None:
-            if (seen["request_target"] != request_target
-                    or seen["request_hash"] != request_digest):
-                # Same key, different request: a client bug, and a dangerous one.
-                return {"error": "idempotency_key_reuse"}, 422, False
-            return deepcopy(seen["body"]), seen["status"], True  # replay the stored outcome
+    commands = storage.BOOKING_COMMANDS if commands is None else commands
+    request_hash = hashlib.sha256(body_bytes).hexdigest()
+    for _ in range(MAX_COMMAND_ATTEMPTS):
+        try:
+            with commands.unit_of_work() as repository:
+                return _run_once_for_key(repository, key, request_target,
+                                         request_hash, operation)
+        except TransactionAborted:
+            continue
+    return {"error": "service_unavailable"}, 503, False
 
-        # First time we see this key: perform the operation, then record the outcome.
-        body, status = operation()
-        storage.IDEMPOTENCY[key] = {
-            "request_target": request_target,
-            "request_hash": request_digest,
-            "status": status,
-            "body": deepcopy(body),
-            "stored_at": monotonic(),
-        }
-        return body, status, False
+
+def _run_once_for_key(repository, key, request_target, request_hash, operation):
+    """Replay or reject the key's live outcome, or run the operation and save its outcome.
+
+    An outcome is live until 24 hours after its completion time; at that
+    instant or later the key starts a new attempt and may bind another request.
+    """
+    stored = repository.claim_key(key, request_target, request_hash)
+    binding_is_live = (stored is not None
+                       and utc_now() < stored["completed_at"] + IDEMPOTENCY_RETENTION)
+    if binding_is_live:
+        if (stored["request_target"] != request_target
+                or stored["request_hash"] != request_hash):
+            # Same key, different request: a client bug, and a dangerous one.
+            return {"error": "idempotency_key_reuse"}, 422, False
+        return stored["body"], stored["status"], True
+
+    body, status = operation(repository)
+    repository.save_outcome(key, {
+        "request_target": request_target,
+        "request_hash": request_hash,
+        "status": status,
+        "body": body,
+        "completed_at": utc_now(),
+    })
+    return body, status, False
