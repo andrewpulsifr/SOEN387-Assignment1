@@ -5,7 +5,7 @@ is imported. Checks cover the first 201 and repeat 200 with one linked
 Reservation at full allocation, the Hold and Reservation views, coded errors
 that change nothing, expiry against a confirmation that outlasts its
 deadline, and abort retries ending in an uncached 503. Confirming a released
-Hold is checked only in the domain tests, because release has no route yet.
+Hold is checked in test_postgres_release.py.
 
 Run from the project root with ENCORE_TEST_DATABASE_URL set:
     python3 -m unittest discover -s tests -p 'test_postgres_confirm.py' -v
@@ -14,18 +14,13 @@ Run from the project root with ENCORE_TEST_DATABASE_URL set:
 import unittest
 from uuid import uuid4
 
-from conformance import get, post, send
-from hold_support import create, seats_left, validate, wait_until_not_held
+from conformance import get, post
+from hold_support import confirm, create, seats_left, validate, wait_until_not_held
 from postgres_support import AppOnPostgresTestCase, requires_postgres
 
 import idempotency
 
 CONFIRM = "/holds/{holdId}/confirm"
-
-
-def confirm(hold_id, body=None, headers=None, query=""):
-    """POST a confirmation with exactly these bytes; return (status, body)."""
-    return send("POST", f"/holds/{hold_id}/confirm{query}", body, headers)[:2]
 
 
 @requires_postgres
@@ -139,9 +134,9 @@ class ConfirmHttpTests(AppOnPostgresTestCase):
         attempts = idempotency.MAX_COMMAND_ATTEMPTS
         with self.running_app("--seed-fresh"):
             hold_id = create("ev_101", str(uuid4()))[1]["id"]
-            self.fail_reservation_inserts("40001", 2 * attempts - 1)
+            self.fail_writes("40001", 2 * attempts - 1)
             exhausted = confirm(hold_id)
-            after_503 = (get(f"/holds/{hold_id}")[1]["status"], self.insert_attempts())
+            after_503 = (get(f"/holds/{hold_id}")[1]["status"], self.write_attempts())
             retried = confirm(hold_id)
             link = get(f"/holds/{hold_id}")[1].get("reservationId")
 
@@ -149,7 +144,7 @@ class ConfirmHttpTests(AppOnPostgresTestCase):
         validate(CONFIRM, "post", 503, exhausted[1])
         self.assertEqual(after_503, ("held", attempts))
         self.assertEqual((retried[0], retried[1]["id"], link), (201, "res_1", "res_1"))
-        self.assertEqual(self.insert_attempts(), 2 * attempts)
+        self.assertEqual(self.write_attempts(), 2 * attempts)
 
 
 if __name__ == "__main__":

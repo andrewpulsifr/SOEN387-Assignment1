@@ -57,6 +57,10 @@ class BookingRepository(Protocol):
         """Return a copy of a stored Hold, or None."""
         ...
 
+    def save_release(self, hold: Hold, released_at: datetime) -> None:
+        """Store that event.release() released the Hold at the time it returned."""
+        ...
+
     def next_reservation_id(self) -> str:
         """Allocate the next reservation ID; a rolled-back block returns it."""
         ...

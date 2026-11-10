@@ -1,3 +1,12 @@
+"""Flask routes for the Encore API.
+
+Each handler reads the request, calls one service function and turns its
+result into a response; keyed POSTs also mark a replay with the
+Idempotency-Replayed header. GET requests are checked against the
+OpenAPI contract before their handler runs. Business rules live in the
+services and the domain.
+"""
+
 import time
 
 from flask import Blueprint, jsonify, request
@@ -94,6 +103,11 @@ def get_waitlist_entry_by_id(event_id, entry_id):
 @api_routes.delete("/events/<event_id>/waitlist/<entry_id>")
 def leave_waitlist(event_id, entry_id):
     body, status = services.leave_waitlist(event_id, entry_id)
+    return _json_or_no_content(body, status)
+
+
+def _json_or_no_content(body, status):
+    """Build a JSON response, or an empty one when the status is 204."""
     if status == 204:
         return "", status
     return jsonify(body), status
@@ -123,3 +137,11 @@ def confirm_hold(hold_id):
     body, status = hold_services.confirm_hold(hold_id, request.args,
                                               request.get_data())
     return jsonify(body), status
+
+
+@api_routes.delete("/holds/<hold_id>")
+def release_hold(hold_id):
+    """Release a Hold; a supplied Idempotency-Key is ignored and a 204 has no body."""
+    body, status = hold_services.release_hold(hold_id, request.args,
+                                              request.get_data())
+    return _json_or_no_content(body, status)

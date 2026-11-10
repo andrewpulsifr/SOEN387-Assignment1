@@ -46,6 +46,7 @@ def send(method, path, body=None, headers=None):
     """Send exactly these body bytes and headers; return (status, JSON body, headers).
 
     body=None sends no body at all, and no Content-Type unless headers has one.
+    An empty response body, such as a 204's, comes back as None.
     """
     request = urllib.request.Request(
         BASE + path,
@@ -55,9 +56,14 @@ def send(method, path, body=None, headers=None):
     )
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
-            return response.status, json.load(response), response.headers
+            return response.status, _json_or_none(response), response.headers
     except urllib.error.HTTPError as error:
-        return error.code, json.load(error), error.headers
+        return error.code, _json_or_none(error), error.headers
+
+def _json_or_none(response):
+    """Decode a JSON response body, or return None if it has no bytes."""
+    raw = response.read()
+    return json.loads(raw) if raw else None
 
 def delete(path):
     request = urllib.request.Request(BASE + path, method="DELETE")

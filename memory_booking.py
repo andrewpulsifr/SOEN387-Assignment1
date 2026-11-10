@@ -114,6 +114,10 @@ class MemoryBookingCommands:
         hold = self.holds.get(hold_id)
         return None if hold is None else copy(hold)
 
+    def save_release(self, hold: Hold, released_at: datetime) -> None:
+        """Store a copy of the released Hold; a Hold here keeps no release time."""
+        self.holds[hold.id] = copy(hold)
+
     def waitlist_entries(self, event_id: str) -> list[dict[str, str]]:
         """Return copies of the event's entries in join order."""
         return [entry.copy() for entry in self.waitlist.get(event_id, [])]

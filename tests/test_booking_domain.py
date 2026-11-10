@@ -4,9 +4,10 @@ Checks Hold status and countdown just before, at and after the deadline, with
 fractional seconds rounded up; that only live Holds take seats; that hold()
 and book() share one availability rule; that confirm() moves a live Hold's
 seat to a Reservation and rejects expired, released, confirmed and foreign
-Holds; that overbooked starting state is rejected; and that the module
-imports nothing. The rules have no storage or clock, so these tests say
-nothing about persistence or database locking.
+Holds; that release() frees only a live Hold's seat and rejects confirmed
+and foreign Holds; that overbooked starting state is rejected; and that the
+module imports nothing. The rules have no storage or clock, so these tests
+say nothing about persistence or database locking.
 
 Run from the project root:
     python3 -m unittest discover -s tests -p 'test_booking*.py' -v
@@ -18,7 +19,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import booking_domain
-from booking_domain import Event, Hold, HoldExpired, HoldReleased, SoldOut
+from booking_domain import (Event, Hold, HoldConfirmed, HoldExpired, HoldReleased,
+                            SoldOut)
 
 CREATED = datetime(2026, 11, 9, 20, 0, tzinfo=timezone.utc)
 DEADLINE = CREATED + timedelta(seconds=90)
@@ -27,6 +29,16 @@ DEADLINE = CREATED + timedelta(seconds=90)
 def held(hold_id="hold_a", **state):
     """Return a ev_103 Hold created at CREATED that expires at DEADLINE."""
     return Hold(hold_id, "ev_103", CREATED, DEADLINE, **state)
+
+
+def ev_103_at(now, holds=None):
+    """Return ev_103 at Capacity 2 with one confirmed seat, observed at now.
+
+    holds defaults to Hold hold_a alone, which fills the Event.
+    """
+    if holds is None:
+        holds = [held("hold_a")]
+    return Event("ev_103", capacity=2, confirmed_occupancy=1, holds=holds, now=now)
 
 
 class HoldTests(unittest.TestCase):
@@ -131,14 +143,9 @@ class EventTests(unittest.TestCase):
 
 
 class ConfirmTests(unittest.TestCase):
-    def full_event(self, now):
-        """Return ev_103 at Capacity 2, filled by one confirmed seat and Hold hold_a."""
-        return Event("ev_103", capacity=2, confirmed_occupancy=1,
-                     holds=[held("hold_a")], now=now)
-
     def test_confirming_a_live_hold_replaces_its_seat_with_a_linked_reservation(self):
         """At full allocation, confirmation succeeds and seats_left stays 0."""
-        event = self.full_event(DEADLINE - timedelta(microseconds=1))
+        event = ev_103_at(DEADLINE - timedelta(microseconds=1))
         hold = held("hold_a")
         reservation = event.confirm(hold, "res_9", "2026-11-08T20:00:00Z")
         self.assertEqual(reservation, {
@@ -161,8 +168,7 @@ class ConfirmTests(unittest.TestCase):
             (CREATED, {"released": True}, HoldReleased, []),
         ]:
             with self.subTest(now=now, error=error.__name__):
-                event = Event("ev_103", capacity=2, confirmed_occupancy=1,
-                              holds=loaded, now=now)
+                event = ev_103_at(now, loaded)
                 hold = held("hold_a", **state)
                 with self.assertRaises(error):
                     event.confirm(hold, "res_9", "2026-11-08T20:00:00Z")
@@ -171,7 +177,7 @@ class ConfirmTests(unittest.TestCase):
 
     def test_rejects_a_confirmed_hold_or_one_this_event_does_not_hold(self):
         """None can take a second Reservation or change this Event's seats."""
-        event = self.full_event(CREATED)
+        event = ev_103_at(CREATED)
         for hold, link in [(held("hold_a", reservation_id="res_4"), "res_4"),
                            (Hold("hold_a", "ev_101", CREATED, DEADLINE), None),
                            (held("hold_unknown"), None)]:
@@ -179,6 +185,49 @@ class ConfirmTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     event.confirm(hold, "res_9", "2026-11-08T20:00:00Z")
                 self.assertEqual(hold.reservation_id, link)
+                self.assertEqual(event.seats_left, 0)
+
+
+class ReleaseTests(unittest.TestCase):
+    def test_releasing_a_live_hold_frees_its_seat_for_good(self):
+        """Just before the deadline the release frees one seat and reports that time."""
+        just_before = DEADLINE - timedelta(microseconds=1)
+        event = ev_103_at(just_before)
+        hold = held("hold_a")
+        self.assertEqual(event.release(hold), just_before)
+        self.assertTrue(hold.released)
+        self.assertEqual(hold.status_at(DEADLINE + timedelta(hours=1)), "released")
+        self.assertEqual(event.seats_left, 1)
+
+    def test_released_and_expired_holds_are_left_as_they_are(self):
+        """A repeat release, or one at or after the deadline, changes nothing.
+
+        The released Hold is absent from the Event, as when storage loads only
+        Holds that are neither confirmed nor released.
+        """
+        for now, state, status, loaded in [
+            (CREATED, {"released": True}, "released", []),
+            (DEADLINE, {}, "expired", [held("hold_a")]),
+            (DEADLINE + timedelta(seconds=1), {}, "expired", [held("hold_a")]),
+        ]:
+            with self.subTest(now=now, status=status):
+                event = ev_103_at(now, loaded)
+                hold = held("hold_a", **state)
+                self.assertIsNone(event.release(hold))
+                self.assertEqual(hold.status_at(now), status)
+                self.assertEqual(event.seats_left, 1)
+
+    def test_rejects_a_confirmed_hold_or_one_this_event_does_not_hold(self):
+        """A confirmed Hold keeps its Reservation; none of these frees a seat."""
+        event = ev_103_at(CREATED)
+        for hold, error in [(held("hold_a", reservation_id="res_4"), HoldConfirmed),
+                            (Hold("hold_a", "ev_101", CREATED, DEADLINE), ValueError),
+                            (held("hold_unknown"), ValueError)]:
+            with self.subTest(hold=hold.id, event_id=hold.event_id, error=error.__name__):
+                link = hold.reservation_id
+                with self.assertRaises(error):
+                    event.release(hold)
+                self.assertEqual((hold.reservation_id, hold.released), (link, False))
                 self.assertEqual(event.seats_left, 0)
 
 

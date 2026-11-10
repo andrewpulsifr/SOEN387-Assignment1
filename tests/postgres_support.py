@@ -5,7 +5,8 @@ databases, for example the Compose server's postgres database. Each test
 gets a new empty database, which is dropped afterwards. Without the variable,
 these tests are skipped. Test cases here either call the service functions on
 that database or start app.py on it and send HTTP requests. A test can also
-make reservation INSERTs fail with a chosen SQLSTATE to exercise retries.
+make chosen row writes, such as reservation INSERTs or Hold UPDATEs, fail
+with a chosen SQLSTATE to exercise retries.
 """
 
 import os
@@ -74,27 +75,28 @@ class PostgresTestCase(unittest.TestCase):
         with psycopg.connect(self.database_url) as conn:
             conn.execute(statement)
 
-    def fail_reservation_inserts(self, sqlstate, times):
-        """Make the next `times` reservation INSERTs raise `sqlstate` inside PostgreSQL.
+    def fail_writes(self, sqlstate, times, on="INSERT ON reservations"):
+        """Make the next `times` row writes named by `on` raise `sqlstate` inside PostgreSQL.
 
-        A sequence counts the attempts, since nextval() survives a rollback.
+        `on` is a trigger event and table, such as "UPDATE ON holds". A
+        sequence counts the attempts, since nextval() survives a rollback.
         """
         self.execute(f"""
-            CREATE SEQUENCE insert_attempts;
-            CREATE FUNCTION fail_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+            CREATE SEQUENCE write_attempts;
+            CREATE FUNCTION fail_write() RETURNS trigger LANGUAGE plpgsql AS $$
             BEGIN
-                IF nextval('insert_attempts') <= {times} THEN
+                IF nextval('write_attempts') <= {times} THEN
                     RAISE EXCEPTION 'injected' USING ERRCODE = '{sqlstate}';
                 END IF;
                 RETURN NEW;
             END $$;
-            CREATE TRIGGER fail_insert BEFORE INSERT ON reservations
-                FOR EACH ROW EXECUTE FUNCTION fail_insert();
+            CREATE TRIGGER fail_write BEFORE {on}
+                FOR EACH ROW EXECUTE FUNCTION fail_write();
         """)
 
-    def insert_attempts(self):
-        """Return how many reservation INSERTs the trigger has seen."""
-        return self.query("SELECT last_value FROM insert_attempts")[0][0]
+    def write_attempts(self):
+        """Return how many row writes the fail_writes() trigger has seen."""
+        return self.query("SELECT last_value FROM write_attempts")[0][0]
 
 
 def free_port():

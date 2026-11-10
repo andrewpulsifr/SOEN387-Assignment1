@@ -5,11 +5,11 @@ A Flask implementation of the Encore event and waitlist API.
 ## Current implementation and Assignment 2 status
 
 Events, immediate reservations, waitlist join/list/lookup/leave, and Hold
-creation (`POST /events/{eventId}/holds`), inspection (`GET /holds/{holdId}`)
-and confirmation (`POST /holds/{holdId}/confirm`) are implemented and stored
-in PostgreSQL, together with the replay outcomes of keyed requests. The
-[OpenAPI contract](contracts/encore-openapi.yaml) also specifies Hold release
-(`DELETE /holds/{holdId}`); that handler is not implemented yet.
+creation (`POST /events/{eventId}/holds`), inspection (`GET /holds/{holdId}`),
+confirmation (`POST /holds/{holdId}/confirm`) and release
+(`DELETE /holds/{holdId}`) are implemented and stored in PostgreSQL, together
+with the replay outcomes of keyed requests. The
+[OpenAPI contract](contracts/encore-openapi.yaml) specifies these operations.
 
 ## Assignment deliverables
 
@@ -102,16 +102,17 @@ Each test creates its own database on that server and drops it afterwards.
 They cover the migration runner (including the upgrade from migration one to
 two), the PostgreSQL adapter through the service functions (row locking,
 waitlist order, rollback, ID allocation, and expiry judged after a lock wait
-for Hold creation and confirmation), durable replay (stored errors, key
-conflicts, same-key contention, the 24-hour boundary on an injected clock, and
-abort retries), and `app.py` started as a process: replay after a restart, a
-failed migration, an invalid Hold TTL, and the Hold checks in
-`tests/test_postgres_holds.py` and `tests/test_postgres_confirm.py`. Those
-send HTTP requests through the conformance helpers and check receipts, the
-current view, coded errors, live Holds filling an event for both booking paths
-and the waitlist, expiry with a 2-second TTL, and first and repeated
-confirmation at full allocation. Without `ENCORE_TEST_DATABASE_URL` these
-tests are skipped.
+for Hold creation, confirmation and release), durable replay (stored errors,
+key conflicts, same-key contention, the 24-hour boundary on an injected clock,
+and abort retries), and `app.py` started as a process: replay after a restart,
+a failed migration, an invalid Hold TTL, and the Hold checks in
+`tests/test_postgres_holds.py`, `tests/test_postgres_confirm.py` and
+`tests/test_postgres_release.py`. Those send HTTP requests through the
+conformance helpers and check receipts, the current view, coded errors, live
+Holds filling an event for both booking paths and the waitlist, expiry with a
+2-second TTL, first and repeated confirmation at full allocation, and release
+of live, released, expired and confirmed Holds. Without
+`ENCORE_TEST_DATABASE_URL` these tests are skipped.
 
 To check booking against a running server, including recovery when a reply is
 lost, run `python3 tests/direct_booking_smoke.py` once on freshly seeded data,
@@ -173,13 +174,22 @@ full event can still confirm its Holds. The first confirmation returns 201
 with the reservation; a repeat returns 200 with the same one, even after the
 old deadline. An expired Hold, including one that expired while its request
 waited for the lock, gives 409 `hold_expired` and changes nothing. A released
-Hold gives 409 `hold_released`, though nothing can release a Hold until the
-release handler exists. Confirmation needs no `Idempotency-Key` and ignores
-one if sent.
+Hold gives 409 `hold_released`. Confirmation needs no `Idempotency-Key` and
+ignores one if sent.
 
-Booking, Hold creation and confirmation, waitlist join and waitlist leave
-each lock their event's row with `SELECT ... FOR UPDATE` before reading the
-state they decide on, so commands on the same event run one at a time. The
+`DELETE /holds/{holdId}` releases a live Hold early. It takes the same steps
+under the event's lock, then sets the Hold's `released_at` mark, which frees
+its seat at once. It returns 204 with no body. Releasing a Hold that is
+already released or has expired also returns 204 and writes nothing, so a
+repeat cannot free a second seat and an expired Hold stays expired. A
+confirmed Hold gives 409 `already_confirmed` with its `reservationId`, even
+after the old deadline; release never cancels a reservation. The Hold stays
+retrievable with `GET /holds/{holdId}` in every case. Release needs no
+`Idempotency-Key` and ignores one if sent.
+
+Booking, Hold creation, confirmation and release, waitlist join and waitlist
+leave each lock their event's row with `SELECT ... FOR UPDATE` before reading
+the state they decide on, so commands on the same event run one at a time. The
 lock ends when the transaction commits or rolls back. Reads run in one read-only
 `REPEATABLE READ` transaction, so a response never mixes two states. Waitlist
 positions follow a join order the database assigns, independent of the random

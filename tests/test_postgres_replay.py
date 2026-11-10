@@ -153,38 +153,38 @@ class PostgresReplayTests(ServicesOnPostgresTestCase):
         attempts = idempotency.MAX_COMMAND_ATTEMPTS
         for sqlstate in ("40001", "40P01"):
             with self.subTest(sqlstate=sqlstate):
-                self.execute("DROP TRIGGER IF EXISTS fail_insert ON reservations;"
-                             " DROP FUNCTION IF EXISTS fail_insert;"
-                             " DROP SEQUENCE IF EXISTS insert_attempts;")
-                self.fail_reservation_inserts(sqlstate, attempts - 1)
+                self.execute("DROP TRIGGER IF EXISTS fail_write ON reservations;"
+                             " DROP FUNCTION IF EXISTS fail_write;"
+                             " DROP SEQUENCE IF EXISTS write_attempts;")
+                self.fail_writes(sqlstate, attempts - 1)
                 key = f"retried-{sqlstate}"
 
                 result = services.create_reservation("ev_101", key, b"", None)
 
                 self.assertEqual((result[0]["status"], result[1:]),
                                  ("confirmed", (201, False)))
-                self.assertEqual(self.insert_attempts(), attempts)
+                self.assertEqual(self.write_attempts(), attempts)
                 self.assertEqual(services.create_reservation("ev_101", key, b"", None),
                                  (result[0], 201, True))
 
     def test_exhausted_retries_return_uncached_503(self):
         """After the last recognized abort: 503, no booking and no stored binding."""
-        self.fail_reservation_inserts("40001", 100)
+        self.fail_writes("40001", 100)
 
         result = services.create_reservation("ev_103", "exhausted", b"", None)
 
         self.assertEqual(result, ({"error": "service_unavailable"}, 503, False))
-        self.assertEqual(self.insert_attempts(), idempotency.MAX_COMMAND_ATTEMPTS)
-        self.execute("DROP TRIGGER fail_insert ON reservations")
+        self.assertEqual(self.write_attempts(), idempotency.MAX_COMMAND_ATTEMPTS)
+        self.execute("DROP TRIGGER fail_write ON reservations")
         retry = services.create_reservation("ev_103", "exhausted", b"", None)
         self.assertEqual((retry[0]["id"], retry[1:]), ("res_1", (201, False)))
 
     def test_other_database_errors_propagate_without_retry(self):
         """Unrecognized SQLSTATEs, including completion-unknown, are raised once."""
-        self.fail_reservation_inserts("40003", 100)
+        self.fail_writes("40003", 100)
         with self.assertRaises(psycopg.errors.StatementCompletionUnknown):
             services.create_reservation("ev_103", "uncertain", b"", None)
-        self.assertEqual(self.insert_attempts(), 1)
+        self.assertEqual(self.write_attempts(), 1)
         self.assertEqual(self.seats_left("ev_103"), 2)
 
 

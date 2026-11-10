@@ -21,6 +21,16 @@ def create(event_id, key, body=None, content_type=None, query=""):
     return send("POST", f"/events/{event_id}/holds{query}", body, headers)
 
 
+def confirm(hold_id, body=None, headers=None, query=""):
+    """POST a confirmation with exactly these bytes; return (status, body)."""
+    return send("POST", f"/holds/{hold_id}/confirm{query}", body, headers)[:2]
+
+
+def release(hold_id, body=None, headers=None, query=""):
+    """DELETE a Hold with exactly these bytes; return (status, body), None when empty."""
+    return send("DELETE", f"/holds/{hold_id}{query}", body, headers)[:2]
+
+
 def validate(path, method, status, body):
     """Check a response body against the contract schema for that status."""
     Draft202012Validator(schema_for(path, method, str(status)),

@@ -199,6 +199,11 @@ class _PostgresRepository:
         return Hold(hold_id, event_id, created_at, expires_at,
                     reservation_id=reservation_id, released=released)
 
+    def save_release(self, hold: Hold, released_at: datetime) -> None:
+        """Set the Hold row's released_at mark to the time the release was decided."""
+        self._conn.execute("UPDATE holds SET released_at = %s WHERE id = %s",
+                           (released_at, hold.id))
+
     def waitlist_entries(self, event_id: str) -> list[dict[str, str]]:
         """Return the event's waitlist entries in join order."""
         rows = self._conn.execute(

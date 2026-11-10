@@ -4,7 +4,7 @@ info:
   version: 1.2.0
   description: >
     Campus event ticketing. v1.2 adds A2 Hold operations. Hold creation,
-    inspection and confirmation are implemented; release is planned. Existing
+    inspection, confirmation and release are implemented. Existing
     paths and schemas retain the v1.1 contract shapes. New Hold, waitlist and
     error responses may add fields; clients should ignore unknown fields.
     The four original event checks are preserved; full released-v1.0.0
@@ -473,12 +473,12 @@ paths:
       operationId: releaseHold
       summary: Release a provisional allocation without deleting the Hold
       description: |
-        Planned A2 operation. No new key or client options are required; a
-        supplied key is ignored. Validate HoldId syntax, reject any query
-        parameter, then any nonempty body, before lookup (422 invalid_request).
-        Ignore Content-Type for zero body bytes. Unknown well-formed Hold IDs
-        return 404 hold_not_found. For a known Hold, acquire its Event lock,
-        reread the Hold and sample fresh server time before the transition.
+        No new key or client options are required; a supplied key is ignored.
+        Validate HoldId syntax, reject any query parameter, then any nonempty
+        body, before lookup (422 invalid_request). Ignore Content-Type for zero
+        body bytes. Unknown well-formed Hold IDs return 404 hold_not_found.
+        For a known Hold, acquire its Event lock, reread the Hold and sample
+        fresh server time before the transition.
 
         Live held -> 204, become released. Released -> 204, no further effect.
         Expired -> 204, remain expired (expiry applies at deadline equality).
