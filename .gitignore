@@ -67,3 +67,6 @@ htmlcov/
 !/_internal/archive/assignment1/SOEN387 Waitlist Design Note.docx
 !/_internal/archive/assignment1/SOEN387-Assignment1-AI-Collaboration-Log-Portrait.docx
 !/_internal/archive/assignment1/TestProof.png
+
+# Word lock files (created while a .docx is open)
+~$*
