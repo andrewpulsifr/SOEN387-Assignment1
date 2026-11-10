@@ -5,7 +5,7 @@ is imported. Checks cover an empty 204 that frees exactly one seat, repeats
 that free none, a released Hold's view and confirmation, expired Holds that
 stay expired, a confirmed Hold's 409 before and after its deadline, coded
 errors that change nothing, and abort retries ending in an uncached 503. A
-race between release and confirmation is not tested here.
+race between release and confirmation is in test_postgres_races.py.
 
 Run from the project root with ENCORE_TEST_DATABASE_URL set:
     python3 -m unittest discover -s tests -p 'test_postgres_release.py' -v

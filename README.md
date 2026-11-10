@@ -109,14 +109,16 @@ and abort retries), and `app.py` started as a process: replay after a restart,
 a failed migration, an invalid Hold TTL, the Hold checks in
 `tests/test_postgres_holds.py`, `tests/test_postgres_confirm.py` and
 `tests/test_postgres_release.py`, the cross-workflow checks in
-`tests/test_postgres_cross_workflow.py`, and the race checks in
-`tests/test_postgres_races.py`. Those send HTTP requests through the
+`tests/test_postgres_cross_workflow.py`, and the race and lock-wait checks in
+`tests/test_postgres_races.py` and `tests/test_postgres_lock_wait.py`. Those
+send HTTP requests through the
 conformance helpers and check receipts, the current view, coded errors, live
 Holds filling an event for both booking paths and the waitlist, expiry with a
 2-second TTL, first and repeated confirmation at full allocation, release
 of live, released, expired and confirmed Holds, key binding and replay
-across all three keyed POSTs, and simultaneous requests for the same seats
-(see [Race run](#race-run)). Without
+across all three keyed POSTs, simultaneous requests for the same seats or
+the same Hold, and a confirmation held up by the event's lock past its
+deadline (see [Race run](#race-run)). Without
 `ENCORE_TEST_DATABASE_URL` these tests are skipped.
 
 To check booking against a running server, including recovery when a reply is
@@ -194,7 +196,8 @@ ENCORE_TEST_DATABASE_URL=postgresql://encore:encore@localhost:5432/postgres \
   python3 tests/run_races.py
 ```
 
-It runs the three tests in `tests/test_postgres_races.py`. Each starts
+It runs the four races in `tests/test_postgres_races.py`, then the lock-wait
+check in `tests/test_postgres_lock_wait.py`. Each race starts
 `app.py` on its own new database loaded from the fresh fixture, with Holds
 that last 300 seconds, so no Hold can expire during the run. A barrier sends
 each race's requests to that one server at the same moment, one thread per
@@ -208,15 +211,35 @@ request:
 - A direct booking and a Hold request for ev_103's last seat, after one Hold
   has taken the other. Whichever runs first gets 201 and the other gets 409
   `sold_out`.
+- A confirmation and a release of the same live Hold. If confirmation runs
+  first it gets 201 with a new reservation and the release gets 409
+  `already_confirmed`. If release runs first it gets 204 and the confirmation
+  gets 409 `hold_released`. Either order passes; any other pair fails.
 
-After each race the test reads the reservations and Holds stored for ev_103
-and asks over HTTP whether each Hold is still live. The stored IDs must match
-the 201 responses, reservations plus live Holds must equal Capacity, and
-`seatsLeft` must be 0. A missing response, a timeout or any other status fails
-the race. Under each test the output lists every response and the final state
-of ev_103, after a header with the same run details as the conformance run.
-The command exits with status 0 only when all three races pass. A captured
-run is in
+After each of the first three races the test reads the reservations and Holds
+stored for ev_103 and asks over HTTP whether each Hold is still live. The
+stored IDs must match the 201 responses, reservations plus live Holds must
+equal Capacity, and `seatsLeft` must be 0. After the confirm/release race the
+stored Hold must be either linked to the one new reservation or marked
+released, never both, and `seatsLeft` must be 1 or 2 to match. A missing
+response, a timeout or any other status fails the race.
+
+The lock-wait check starts `app.py` with 2-second Holds and creates one on
+ev_103. A separate database connection then locks ev_103's row, as a rival
+command would, and the test sends a confirmation. It reads
+`pg_stat_activity` to see that request waiting on the lock while the Hold is
+still live, then waits until the database clock is past the Hold's stored
+`expires_at` and sees the request still waiting. Only then does it let the
+lock go. The confirmation must get 409 `hold_expired`, with no reservation
+stored and both seats free. A confirmation sent after the deadline would
+pass without showing anything, so the check fails if it cannot see the
+request waiting before the deadline.
+
+Under each test the output lists every response and the final state of
+ev_103; the lock-wait check also lists the stored deadline and the database
+times at which it saw the request waiting. A header with the same run details
+as the conformance run comes first. The command exits with status 0 only when
+every check passes. A captured run is in
 [deliverables/assignment2/race-run.txt](deliverables/assignment2/race-run.txt).
 
 Without a lock, two requests could each count the last free seat before
@@ -229,6 +252,11 @@ its stored outcome commit in one transaction (see
 [Replay of keyed requests](#replay-of-keyed-requests)). A passing run covers
 the order its requests happened to run in. The locks are why no other order
 can oversell or run one key's request twice.
+
+Confirmation and release take the same event lock and then read the Hold
+again, so the second of them sees what the first stored. They read the clock
+in a separate query after the lock is held, so a request that waited judges
+expiry at the moment it decides, not when it arrived.
 
 The race run leaves out checks that need only one request at a time.
 `tests/test_postgres_cross_workflow.py` checks that a key sent again with

@@ -2,10 +2,13 @@
 
 Each test starts app.py on a freshly seeded database, sends its requests at
 the same moment with run_together(), and accounts for every response. It then
-reads the Holds and Reservations stored for ev_103 (Capacity 2) and checks
-over HTTP that Reservations plus live Holds fill Capacity exactly. Holds last
-300 seconds, longer than a run, so expiry cannot hide an oversell. A passing
-run covers only the order its requests happened to run in.
+reads the Holds and Reservations stored for ev_103 (Capacity 2). The races
+for seats check over HTTP that Reservations plus live Holds fill Capacity
+exactly. The confirm/release race on one Hold accepts either winner, and
+checks that the stored Hold, Reservations and seatsLeft all match it. Holds
+last 300 seconds, longer than a run, so expiry cannot hide an oversell or end
+the Hold mid-race. A passing run covers only the order its requests happened
+to run in.
 
 Responses and final states go to the "encore.races" logger, which
 tests/run_races.py prints; ordinary test runs show nothing.
@@ -25,6 +28,8 @@ from hold_support import CREATE, create, lifetime, run_together, seats_left, val
 from postgres_support import AppOnPostgresTestCase, requires_postgres
 
 CAPACITY = 2  # ev_103's Capacity in contracts/fixtures/fresh-events.json
+CONFIRM = "/holds/{holdId}/confirm"
+RELEASE = "/holds/{holdId}"
 HOLD_TTL_SECONDS = 300
 SOLD_OUT = (409, {"error": "sold_out"})
 
@@ -32,10 +37,11 @@ log = logging.getLogger("encore.races")
 
 
 def outcome(response):
-    """Describe a keyed POST response as its status and resource ID or error code."""
+    """Describe a response as its status and resource ID, error code or empty body."""
     status, body, headers = response
     replay = " (replay)" if headers.get("Idempotency-Replayed") == "true" else ""
-    return f"{status} {body.get('id') or body.get('error')}{replay}"
+    detail = (body or {}).get("id") or (body or {}).get("error") or "no body"
+    return f"{status} {detail}{replay}"
 
 
 def hold_request(key):
@@ -45,7 +51,7 @@ def hold_request(key):
 
 @requires_postgres
 class RaceHttpTests(AppOnPostgresTestCase):
-    """Races for ev_103's seats, each on its own app and database."""
+    """Races for ev_103's seats or one of its Holds, each on its own app and database."""
 
     def racing_app(self):
         """Start app.py on freshly seeded data with 300-second Holds."""
@@ -83,7 +89,8 @@ class RaceHttpTests(AppOnPostgresTestCase):
         seats = seats_left("ev_103")
         log.info("final ev_103 (Capacity %s): seatsLeft %s; stored Reservations %s;"
                  " pending Holds %s", CAPACITY, seats, reservations or "none",
-                 ", ".join(f"{hold_id} {status}" for hold_id, status in statuses.items()))
+                 ", ".join(f"{hold_id} {status}" for hold_id, status in statuses.items())
+                 or "none")
         return seats, reservations, statuses
 
     def assert_fills_capacity(self, final, reservations, holds):
@@ -160,6 +167,45 @@ class RaceHttpTests(AppOnPostgresTestCase):
         reservations = [booking[1]["id"]] if booking[0] == 201 else []
         holds = [first_seat["id"]] + ([hold[1]["id"]] if hold[0] == 201 else [])
         self.assert_fills_capacity(final, reservations, holds)
+
+    def test_a_confirm_and_a_release_racing_on_one_hold_end_it_one_way(self):
+        """Confirm wins (201, then 409 already_confirmed) or release wins (204, then 409 hold_released)."""
+        with self.racing_app():
+            receipt = self.hold_first_seat()
+            hold_id = receipt["id"]
+            confirmed, released = self.race([
+                (f"POST /holds/{hold_id}/confirm",
+                 partial(send, "POST", f"/holds/{hold_id}/confirm")),
+                (f"DELETE /holds/{hold_id}", partial(send, "DELETE", f"/holds/{hold_id}")),
+            ])
+            self.assertIn((confirmed[0], released[0]), [(201, 409), (409, 204)],
+                          (confirmed, released))
+            view = send("GET", f"/holds/{hold_id}")[:2]
+            seats, reservations, pending = self.final_state()
+            stored_hold = self.query("SELECT reservation_id, released_at IS NOT NULL"
+                                     " FROM holds WHERE id = %s", (hold_id,))
+        log.info("final %s: %s; stored link and released mark %s",
+                 hold_id, view[1]["status"], stored_hold[0])
+
+        validate(CONFIRM, "post", confirmed[0], confirmed[1])
+        self.assertEqual(pending, {})
+        if confirmed[0] == 201:
+            reservation_id = confirmed[1]["id"]
+            validate(RELEASE, "delete", 409, released[1])
+            self.assertEqual(released[:2], (409, {"error": "already_confirmed",
+                                                  "reservationId": reservation_id}))
+            self.assertEqual(view, (200, {**receipt, "status": "confirmed",
+                                          "secondsRemaining": 0,
+                                          "reservationId": reservation_id}))
+            self.assertEqual(stored_hold, [(reservation_id, False)])
+            self.assertEqual((reservations, seats), ([reservation_id], CAPACITY - 1))
+        else:
+            self.assertEqual(confirmed[:2], (409, {"error": "hold_released"}))
+            self.assertEqual(released[:2], (204, None))
+            self.assertEqual(view, (200, {**receipt, "status": "released",
+                                          "secondsRemaining": 0}))
+            self.assertEqual(stored_hold, [(None, True)])
+            self.assertEqual((reservations, seats), ([], CAPACITY))
 
 
 if __name__ == "__main__":
