@@ -14,15 +14,14 @@ Run from the project root with the Compose PostgreSQL server up:
 It exits with status 0 only if every check passes.
 """
 
-import logging
 import sys
-import unittest
 from pathlib import Path
 
 # The suites import the application modules from the project root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from run_conformance import counts, passed, print_header, run_tests, server_url_missing
+from run_conformance import (ResultWithLog, counts, passed, print_header, run_tests,
+                             server_url_missing, show_log)
 from test_postgres_lock_wait import HOLD_TTL_SECONDS as LOCK_WAIT_TTL_SECONDS
 from test_postgres_races import HOLD_TTL_SECONDS
 
@@ -36,37 +35,19 @@ def main():
                  " a race fails if its requests have not all been answered within"
                  f" 10 seconds. {LOCK_WAIT_TTL_SECONDS} seconds in the lock-wait check,"
                  " so its Hold expires while the confirmation waits")
-    show_race_log()
+    show_log("encore.races")
 
     print("\n== Races: tests/test_postgres_races.py, one new database per test ==",
           flush=True)
-    races = run_tests(["test_postgres_races"], resultclass=ResultWithRaceLog)
+    races = run_tests(["test_postgres_races"], resultclass=ResultWithLog)
     print("\n== Lock wait: tests/test_postgres_lock_wait.py, on its own new database ==",
           flush=True)
-    lock_wait = run_tests(["test_postgres_lock_wait"], resultclass=ResultWithRaceLog)
+    lock_wait = run_tests(["test_postgres_lock_wait"], resultclass=ResultWithLog)
 
     print("\n== Summary ==")
     print(f"Race tests: {counts(races)}")
     print(f"Lock-wait test: {counts(lock_wait)}")
     return 0 if passed(races) and passed(lock_wait) else 1
-
-
-class ResultWithRaceLog(unittest.TextTestResult):
-    """Verbose test result that ends each test's description line before its race log."""
-
-    def startTest(self, test):
-        """Print the test's description as usual, then end the line."""
-        super().startTest(test)
-        self.stream.writeln()
-
-
-def show_race_log():
-    """Print the checks' logged responses and observations, indented, on standard output."""
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter("    %(message)s"))
-    races = logging.getLogger("encore.races")
-    races.addHandler(handler)
-    races.setLevel(logging.INFO)
 
 
 if __name__ == "__main__":

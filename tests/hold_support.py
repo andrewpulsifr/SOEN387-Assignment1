@@ -1,4 +1,4 @@
-"""HTTP helpers shared by the Hold tests that run app.py on PostgreSQL.
+"""HTTP helpers shared by the tests that run app.py on PostgreSQL.
 
 They send requests through the conformance helpers, so no handler code is
 imported, and check bodies against the contract's response schemas.
@@ -9,8 +9,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
 from threading import Barrier
+from uuid import uuid4
 
-from conformance import get, schema_for, send
+from conformance import get, post, schema_for, send
 from jsonschema import Draft202012Validator
 
 CREATE = "/events/{eventId}/holds"
@@ -32,6 +33,12 @@ def confirm(hold_id, body=None, headers=None, query=""):
 def release(hold_id, body=None, headers=None, query=""):
     """DELETE a Hold with exactly these bytes; return (status, body), None when empty."""
     return send("DELETE", f"/holds/{hold_id}{query}", body, headers)[:2]
+
+
+def join_waitlist(event_id, user_id):
+    """Join the event's waitlist with a new idempotency key; return (status, body)."""
+    return post(f"/events/{event_id}/waitlist", f'{{"userId":"{user_id}"}}'.encode(),
+                str(uuid4()))
 
 
 def validate(path, method, status, body):

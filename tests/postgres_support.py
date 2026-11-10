@@ -121,11 +121,13 @@ def app_env(database_url, env=None):
 
 
 @contextmanager
-def serving_app(database_url, *args, env=None):
+def serving_app(database_url, *args, env=None, output_lines=None):
     """Start app.py on database_url and a free port, and kill it afterwards.
 
     Yields the app's base URL once it answers GET /events. Raises
     AssertionError if the app exits first or does not answer within 15 seconds.
+    If output_lines is a list, everything the app printed is appended to it,
+    line by line, once the app has been killed.
     """
     port = free_port()
     base = f"http://127.0.0.1:{port}"
@@ -149,6 +151,8 @@ def serving_app(database_url, *args, env=None):
     finally:
         process.kill()
         process.wait(timeout=5)
+        if output_lines is not None:
+            output_lines.extend(output.read().decode().splitlines())
         output.close()
 
 
@@ -167,12 +171,14 @@ class AppOnPostgresTestCase(PostgresTestCase):
         return app_env(self.database_url, env)
 
     @contextmanager
-    def running_app(self, *args, env=None):
+    def running_app(self, *args, env=None, output_lines=None):
         """Start app.py on the test database and kill it after the block.
 
         Inside the block the conformance helpers send requests to this app.
+        output_lines collects the app's output as in serving_app().
         """
-        with (serving_app(self.database_url, *args, env=env) as base,
+        with (serving_app(self.database_url, *args, env=env,
+                          output_lines=output_lines) as base,
               patch.object(conformance, "BASE", base)):
             yield
 

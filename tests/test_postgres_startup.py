@@ -15,22 +15,18 @@ from uuid import uuid4
 
 import psycopg
 from conformance import delete, get, post, post_with_headers
+from hold_support import join_waitlist
 from postgres_support import AppOnPostgresTestCase, free_port, requires_postgres
 
 
 @requires_postgres
 class StartupTests(AppOnPostgresTestCase):
-    def join(self, user_id):
-        """Join ev_102's waitlist over HTTP with a new idempotency key."""
-        return post("/events/ev_102/waitlist", f'{{"userId":"{user_id}"}}'.encode(),
-                    str(uuid4()))
-
     def test_bookings_queue_order_and_ids_survive_a_killed_process(self):
         keys = [str(uuid4()) for _ in range(3)]
         with self.running_app("--seed-fresh"):
             first, second, sold_out = (post("/events/ev_103/reservations", b"{}", key)
                                        for key in keys)
-            (_, alice), (_, bob), (_, carol) = (self.join(user)
+            (_, alice), (_, bob), (_, carol) = (join_waitlist("ev_102", user)
                                                 for user in ("alice", "bob", "carol"))
             self.assertEqual(delete(f"/events/ev_102/waitlist/{bob['id']}"), 204)
         self.assertEqual([first[0], second[0], sold_out[0]], [201, 201, 409])
@@ -52,7 +48,7 @@ class StartupTests(AppOnPostgresTestCase):
 
         with self.running_app():
             third = post("/events/ev_101/reservations", b"{}", str(uuid4()))
-            dave = self.join("dave")
+            dave = join_waitlist("ev_102", "dave")
         self.assertEqual([first[1]["id"], second[1]["id"], third[1]["id"]],
                          ["res_1", "res_2", "res_3"])
         self.assertEqual(dave[1]["position"], 3)

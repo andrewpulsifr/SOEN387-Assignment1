@@ -1,0 +1,72 @@
+Encore restart and migration run on PostgreSQL
+Command: python3 tests/run_restart.py, with ENCORE_TEST_DATABASE_URL set
+Expected: every check passes and the command exits with status 0
+Source: 1f4f5c5
+  uncommitted:  M README.md
+  uncommitted:  M tests/hold_support.py
+  uncommitted:  M tests/postgres_support.py
+  uncommitted:  M tests/run_conformance.py
+  uncommitted:  M tests/run_races.py
+  uncommitted:  M tests/test_postgres_startup.py
+  uncommitted: ?? deliverables/assignment2/restart-run.txt
+  uncommitted: ?? tests/run_restart.py
+  uncommitted: ?? tests/test_postgres_restart.py
+Contract: contracts/encore-openapi.yaml version 1.2.0, SHA-256 edc541a03ae9a516a9529e494b80be67f474022336f5af4cdaab651e2eb353f7
+Python 3.13.5, Flask 3.1.3, psycopg 3.3.8, jsonschema 4.26.0, PostgreSQL 17.11 (Debian 17.11-1.pgdg13+2)
+Hold TTL: 90 seconds (the app.py default); the restart test waits one second between kill and restart
+Retries: up to 3 attempts per command after SQLSTATE 40001 or 40P01, with no delay
+Fixtures: every server runs on a new database loaded from contracts/fixtures/fresh-events.json, dropped afterwards
+Restart: app.py is killed, then started again on the same database without --seed-fresh; nothing is reset or reseeded in between
+
+== Restart: tests/test_postgres_restart.py, one database kept across one restart ==
+test_holds_links_queue_and_receipts_survive_one_killed_process (test_postgres_restart.RestartHttpTests.test_holds_links_queue_and_receipts_survive_one_killed_process) ... 
+    before restart: live Hold hold_814548606e9343b4baac182f1587e6c6 createdAt 2026-11-10T20:54:52.619351Z expiresAt 2026-11-10T20:56:22.619351Z secondsRemaining 90
+    before restart: Hold hold_7495742dfacb4ec9a5bc442414a9e677 confirmed -> 201 res_1; Hold hold_1582fa9039484714a3981042f3fc002b released -> 204; sold-out Hold request -> 409 {'error': 'sold_out'}
+    before restart: ev_102 waitlist ['alice', 'bob']
+    first start printed: ['Migrations applied: 001_initial.sql, 002_holds_and_reservation_link.sql', 'Fresh fixture loaded', 'Hold TTL: 90 seconds']
+    schema_migrations: 1 001_initial.sql applied at 2026-11-10T20:54:52.505733+00:00
+    schema_migrations: 2 002_holds_and_reservation_link.sql applied at 2026-11-10T20:54:52.510786+00:00
+    --- app.py killed; restarted on the same database without --seed-fresh ---
+    restart printed: ['Migrations applied: none pending', 'Hold TTL: 90 seconds']
+    after restart: live Hold hold_814548606e9343b4baac182f1587e6c6 held expiresAt 2026-11-10T20:56:22.619351Z secondsRemaining 89
+    after restart: Hold hold_7495742dfacb4ec9a5bc442414a9e677 confirmed reservationId res_1; GET /reservations/res_1 -> 200; Hold hold_1582fa9039484714a3981042f3fc002b released
+    after restart: ev_102 waitlist [('alice', 1), ('bob', 2)]
+    after restart: live Hold key retried -> 201 {'createdAt': '2026-11-10T20:54:52.619351Z', 'eventId': 'ev_101', 'expiresAt': '2026-11-10T20:56:22.619351Z', 'id': 'hold_814548606e9343b4baac182f1587e6c6', 'status': 'held'}, Idempotency-Replayed true
+    after restart: sold-out key retried -> 409 {'error': 'sold_out'}, Idempotency-Replayed true
+    after restart: ev_103 seatsLeft 1; stored Hold rows and ledger unchanged
+    after restart: new booking on ev_103 -> 201 {'createdAt': '2026-09-12T19:00:00Z', 'eventId': 'ev_103', 'id': 'res_2', 'status': 'confirmed'}
+ok
+
+----------------------------------------------------------------------
+Ran 1 test in 1.929s
+
+OK
+
+== Startup: tests/test_postgres_startup.py, one new database per test ==
+test_bookings_queue_order_and_ids_survive_a_killed_process (test_postgres_startup.StartupTests.test_bookings_queue_order_and_ids_survive_a_killed_process) ... ok
+test_failed_migration_stops_startup_and_rolls_back (test_postgres_startup.StartupTests.test_failed_migration_stops_startup_and_rolls_back) ... ok
+test_invalid_hold_ttl_stops_startup_before_migrating (test_postgres_startup.StartupTests.test_invalid_hold_ttl_stops_startup_before_migrating)
+Zero, negative, fractional and non-numeric TTLs exit 1 and leave no schema. ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 3.340s
+
+OK
+
+== Migration runner: tests/test_postgres_migrations.py, one new empty database per test ==
+test_concurrent_migrators_apply_each_step_once (test_postgres_migrations.MigrationRunnerTests.test_concurrent_migrators_apply_each_step_once) ... ok
+test_failed_step_leaves_neither_its_changes_nor_its_ledger_row (test_postgres_migrations.MigrationRunnerTests.test_failed_step_leaves_neither_its_changes_nor_its_ledger_row) ... ok
+test_fresh_database_applies_both_migrations_in_order (test_postgres_migrations.MigrationRunnerTests.test_fresh_database_applies_both_migrations_in_order) ... ok
+test_rerun_applies_nothing_and_keeps_existing_rows (test_postgres_migrations.MigrationRunnerTests.test_rerun_applies_nothing_and_keeps_existing_rows) ... ok
+test_upgrade_from_migration_one_keeps_rows_and_links_holds (test_postgres_migrations.MigrationRunnerTests.test_upgrade_from_migration_one_keeps_rows_and_links_holds)
+Migration two adds Holds beside A1 state that migration one stored. ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.320s
+
+OK
+
+== Summary ==
+Restart test: 1 run, 0 failed, 0 errors, 0 skipped
+Startup tests: 3 run, 0 failed, 0 errors, 0 skipped
+Migration runner tests: 5 run, 0 failed, 0 errors, 0 skipped

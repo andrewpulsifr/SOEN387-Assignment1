@@ -15,9 +15,9 @@ with the replay outcomes of keyed requests. The
 
 Final Assignment 2 documents and selected captures belong in
 `deliverables/assignment2/`. The old/new conformance output is there as
-`conformance-run.txt`, and the race output as `race-run.txt`. The two-page
-design note, AI log and restart demonstration remain pending. No Assignment 2
-submission ZIP has been prepared.
+`conformance-run.txt`, the race output as `race-run.txt`, and the restart and
+migration output as `restart-run.txt`. The two-page design note and AI log
+remain pending. No Assignment 2 submission ZIP has been prepared.
 
 ## Review map
 
@@ -106,6 +106,7 @@ waitlist order, rollback, ID allocation, and expiry judged after a lock wait
 for Hold creation, confirmation and release), durable replay (stored errors,
 key conflicts, same-key contention, the 24-hour boundary on an injected clock,
 and abort retries), and `app.py` started as a process: replay after a restart,
+Holds and their links after a restart (see [Restart run](#restart-run)),
 a failed migration, an invalid Hold TTL, the Hold checks in
 `tests/test_postgres_holds.py`, `tests/test_postgres_confirm.py` and
 `tests/test_postgres_release.py`, the cross-workflow checks in
@@ -161,7 +162,7 @@ reported on its own because it does not use HTTP, compares the four original
 event check bodies with their recorded copy, checks the parsed contract, and
 checks the 24-hour key retention boundary on an injected clock. Race,
 restart, migration and lock-wait checks are not part of this run; the race
-run below and the PostgreSQL checks above cover them.
+and restart runs below cover them.
 
 The header lists the command and expected result, the Git revision and any
 uncommitted files, the contract version and checksum, the Python, Flask,
@@ -263,6 +264,69 @@ The race run leaves out checks that need only one request at a time.
 another route, event or body is rejected as key reuse, and
 `tests/test_postgres_replay.py` checks that a failed command keeps neither its
 writes nor its key claim.
+
+## Restart run
+
+One command runs the restart and migration checks on PostgreSQL. With the
+Compose server up, run:
+
+```bash
+ENCORE_TEST_DATABASE_URL=postgresql://encore:encore@localhost:5432/postgres \
+  python3 tests/run_restart.py
+```
+
+`tests/test_postgres_restart.py` starts `app.py` with `--seed-fresh` on a new
+database and the default 90-second Holds, then builds one dataset over HTTP:
+
+- a live Hold on ev_101, whose 201 receipt is stored under its key;
+- a Hold on ev_103 confirmed into `res_1`;
+- a second Hold on ev_103, which fills the event, and a Hold request with
+  another key that gets 409 `sold_out` and is stored under that key;
+- the release of that second Hold, which frees one ev_103 seat;
+- alice and bob on ev_102's waitlist, in that order.
+
+The test kills the process, waits one second and starts `app.py` again on the
+same database without `--seed-fresh`. After the restart:
+
+- the live Hold has the same ID, `createdAt` and `expiresAt`, and a smaller
+  `secondsRemaining`;
+- the confirmed Hold still links to `res_1`, `res_1` is unchanged, the other
+  Hold is still released, and alice and bob keep positions 1 and 2;
+- the live Hold's key replays its original 201 receipt, and the sold-out key
+  replays 409 `sold_out` even though ev_103 now has a free seat, both marked
+  `Idempotency-Replayed: true`;
+- the stored Hold rows and the `schema_migrations` ledger are the same as
+  before the restart, so nothing renewed a deadline or created a Hold;
+- a new booking on ev_103 gets `res_2`, after the stored `res_1`.
+
+The first start prints `Migrations applied: 001_initial.sql,
+002_holds_and_reservation_link.sql` and loads the fixture; the restart prints
+`Migrations applied: none pending` and does not seed. A Hold that expired
+during a restart would also be valid, but with 90-second Holds this one
+stays live.
+
+The run then repeats `tests/test_postgres_startup.py`: reservations,
+waitlist order and numbering after a killed process, with and without
+`--seed-fresh`, and startup stopped by a failed migration or an invalid
+`ENCORE_HOLD_TTL_SECONDS`. Last it runs `tests/test_postgres_migrations.py`:
+both steps in order on a new database, an upgrade from migration one that
+keeps its rows, a rerun that applies nothing, a failed step rolled back with
+its ledger row, and two migrators that apply each step once.
+
+Under the restart test the output lists the values seen before and after the
+restart, including what `app.py` printed on each start and the
+`schema_migrations` rows. A header with the
+same run details as the conformance run comes first. The command exits with
+status 0 only when every check passes. A captured run is in
+[deliverables/assignment2/restart-run.txt](deliverables/assignment2/restart-run.txt).
+
+Holds, Reservations and waitlist entries stay stored with no time limit, a
+Hold counts against capacity only until its `expiresAt`, and a key's stored
+outcome replays for 24 hours from when its request finished. The restart run
+shows the first of these and the fixed deadline. The 24-hour boundary is checked on an injected clock in the
+[conformance run](#conformance-run), and the Hold suites in that run check
+that a replayed receipt stays the same while GET shows the Hold's current
+state.
 
 ## Database setup
 

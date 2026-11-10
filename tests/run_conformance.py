@@ -7,8 +7,8 @@ HTTP suites, which start app.py on a new database per test. A last section
 runs checks without HTTP: the original check bodies against their recorded
 copy, the parsed contract, and 24-hour key retention on an injected clock.
 Databases are dropped afterwards, so there is nothing to reset. The header
-records the command, revision, versions and settings. tests/run_races.py
-reuses the header and test-running helpers.
+records the command, revision, versions and settings. tests/run_races.py and
+tests/run_restart.py reuse the header, test-running and log-printing helpers.
 
 Run from the project root with the Compose PostgreSQL server up:
     ENCORE_TEST_DATABASE_URL=postgresql://encore:encore@localhost:5432/postgres \\
@@ -17,6 +17,7 @@ It exits with status 0 only if every section passes.
 """
 
 import hashlib
+import logging
 import os
 import platform
 import subprocess
@@ -138,6 +139,24 @@ def run_tests(names, resultclass=None):
     tests = unittest.defaultTestLoader.loadTestsFromNames(names)
     return unittest.TextTestRunner(stream=sys.stdout, verbosity=2,
                                    resultclass=resultclass).run(tests)
+
+
+class ResultWithLog(unittest.TextTestResult):
+    """Verbose test result that ends each test's description line before its logged lines."""
+
+    def startTest(self, test):
+        """Print the test's description as usual, then end the line."""
+        super().startTest(test)
+        self.stream.writeln()
+
+
+def show_log(logger_name):
+    """Print the named logger's messages, indented, on standard output."""
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("    %(message)s"))
+    logger = logging.getLogger(logger_name)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
 
 def counts(result):
