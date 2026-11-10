@@ -13,18 +13,47 @@ with the replay outcomes of keyed requests. The
 
 ## Assignment deliverables
 
-Final Assignment 2 documents and selected captures belong in
-`deliverables/assignment2/`. The old/new conformance output is there as
-`conformance-run.txt`, the race output as `race-run.txt`, and the restart and
-migration output as `restart-run.txt`. The two-page design note and AI log
-remain pending. No Assignment 2 submission ZIP has been prepared.
+Each Assignment 2 deliverable is in these files. The documents and captured
+runs are in `deliverables/assignment2/`.
+
+| Deliverable | Files |
+|---|---|
+| Extended contract: Holds, confirmation and coded errors | [contracts/encore-openapi.yaml](contracts/encore-openapi.yaml), version 1.2.0 |
+| Domain layer: the Hold state machine and the capacity rule | `booking_domain.py`, which imports nothing |
+| Service layer | `hold_services.py` for Holds, `services.py` for events, direct booking and the waitlist, `idempotency.py` for keyed replay and retries |
+| Repository | `booking_repository.py` (the interface), `postgres_booking.py` (PostgreSQL), `memory_booking.py` (the in-memory test double) |
+| Database and migrations | `compose.yaml`, `migrate.py`, `migrations/001_initial.sql`, `migrations/002_holds_and_reservation_link.sql`; see [Run](#run) and [Database setup](#database-setup) |
+| Concurrency test and its output | `tests/run_races.py`, `tests/test_postgres_races.py`, `tests/test_postgres_lock_wait.py`; [race-run.txt](deliverables/assignment2/race-run.txt) |
+| Restart demonstration | `tests/run_restart.py`, `tests/test_postgres_restart.py`; [restart-run.txt](deliverables/assignment2/restart-run.txt) |
+| Conformance suite, old and new | `tests/run_conformance.py`, `tests/conformance.py`; [conformance-run.txt](deliverables/assignment2/conformance-run.txt) |
+| Two-page design note | [SOEN387-Assignment2-Design-Note.docx](deliverables/assignment2/SOEN387-Assignment2-Design-Note.docx) |
+| AI-collaboration log | [SOEN387-Assignment2-AI-Collaboration-Log.docx](deliverables/assignment2/SOEN387-Assignment2-AI-Collaboration-Log.docx) |
+
+The three captured runs come from commit `ff13408` with no uncommitted
+changes, on Python 3.13.5, Flask 3.1.3, psycopg 3.3.8, jsonschema 4.26.0 and
+PostgreSQL 17.11 in the Compose container. Each file's header also gives the
+command, the contract's checksum, the Hold TTL and the retry setting. To
+repeat the runs, follow [Run](#run) to start PostgreSQL, then:
+
+```bash
+export ENCORE_TEST_DATABASE_URL=postgresql://encore:encore@localhost:5432/postgres
+python3 tests/run_conformance.py
+python3 tests/run_races.py
+python3 tests/run_restart.py
+python3 -m unittest discover -s tests -v
+```
+
+Every PostgreSQL check creates its own database and drops it afterwards, and
+each command exits with status 0 only when every check passes. The last
+command runs every `test_*.py` file in `tests/`, 93 tests in all. No
+Assignment 2 submission ZIP has been prepared.
 
 ## Review map
 
 Review the root Python modules and `requirements.txt` for the application,
 `contracts/` for the active API contract and setup fixtures, `tests/` for
-executable checks and their inputs, and `deliverables/assignment2/` for final
-Assignment 2 documents and evidence once produced.
+executable checks and their inputs, and `deliverables/assignment2/` for the
+final Assignment 2 documents and evidence.
 
 `_internal/` holds local plans, policies, journals, tools, scratch work, and
 historical Assignment 1 deliverables. Exclude it from the Assignment 2 ZIP.

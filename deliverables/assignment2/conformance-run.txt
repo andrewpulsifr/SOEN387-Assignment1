@@ -1,13 +1,7 @@
 Encore conformance run on PostgreSQL
 Command: python3 tests/run_conformance.py, with ENCORE_TEST_DATABASE_URL set
 Expected: every check passes and the command exits with status 0
-Source: 6d74feb
-  uncommitted:  M README.md
-  uncommitted:  M tests/conformance.py
-  uncommitted:  M tests/direct_booking_smoke.py
-  uncommitted:  M tests/postgres_support.py
-  uncommitted: ?? tests/run_conformance.py
-  uncommitted: ?? tests/test_postgres_cross_workflow.py
+Source: ff13408
 Contract: contracts/encore-openapi.yaml version 1.2.0, SHA-256 edc541a03ae9a516a9529e494b80be67f474022336f5af4cdaab651e2eb353f7
 Python 3.13.5, Flask 3.1.3, psycopg 3.3.8, jsonschema 4.26.0, PostgreSQL 17.11 (Debian 17.11-1.pgdg13+2)
 Hold TTL: 90 seconds (the app.py default); expiry checks start app.py with ENCORE_HOLD_TTL_SECONDS=2
@@ -15,7 +9,7 @@ Retries: up to 3 attempts per command after SQLSTATE 40001 or 40P01, with no del
 Fixtures: every server runs on a new database loaded from contracts/fixtures/fresh-events.json, dropped afterwards
 
 == Original checks: tests/conformance.py, check code unchanged ==
-Conformance run against http://127.0.0.1:55802
+Conformance run against http://127.0.0.1:58939
   PASS  GET /events matches the contract's response schema
   PASS  bookable=true filters and still matches the schema
   PASS  GET /events/{id} matches the Event schema
@@ -77,7 +71,7 @@ test_stored_outcomes_replay_unchanged_while_holds_fill_and_free_the_event (test_
 With a 2-second TTL on ev_103 (Capacity 2), replays ignore the seats taken and returned. ... ok
 
 ----------------------------------------------------------------------
-Ran 16 tests in 16.130s
+Ran 16 tests in 17.771s
 
 OK
 
@@ -98,7 +92,7 @@ test_binding_expires_24_hours_after_completion (test_postgres_replay.PostgresRep
 One second before expiry it replays; at equality another binding may start. ... ok
 
 ----------------------------------------------------------------------
-Ran 7 tests in 0.126s
+Ran 7 tests in 0.153s
 
 OK
 

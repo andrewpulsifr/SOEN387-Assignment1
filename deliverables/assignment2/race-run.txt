@@ -1,13 +1,7 @@
 Encore race run on PostgreSQL
 Command: python3 tests/run_races.py, with ENCORE_TEST_DATABASE_URL set
 Expected: every check passes and the command exits with status 0
-Source: dad96e8
-  uncommitted:  M README.md
-  uncommitted:  M deliverables/assignment2/race-run.txt
-  uncommitted:  M tests/run_races.py
-  uncommitted:  M tests/test_postgres_races.py
-  uncommitted:  M tests/test_postgres_release.py
-  uncommitted: ?? tests/test_postgres_lock_wait.py
+Source: ff13408
 Contract: contracts/encore-openapi.yaml version 1.2.0, SHA-256 edc541a03ae9a516a9529e494b80be67f474022336f5af4cdaab651e2eb353f7
 Python 3.13.5, Flask 3.1.3, psycopg 3.3.8, jsonschema 4.26.0, PostgreSQL 17.11 (Debian 17.11-1.pgdg13+2)
 Hold TTL: 300 seconds in every race, longer than a whole run; a race fails if its requests have not all been answered within 10 seconds. 2 seconds in the lock-wait check, so its Hold expires while the confirmation waits
@@ -17,53 +11,53 @@ Fixtures: every server runs on a new database loaded from contracts/fixtures/fre
 == Races: tests/test_postgres_races.py, one new database per test ==
 test_a_booking_and_a_hold_racing_for_the_last_seat_allocate_it_once (test_postgres_races.RaceHttpTests.test_a_booking_and_a_hold_racing_for_the_last_seat_allocate_it_once)
 One 201 and one 409 sold_out, whichever path runs first, and one seat taken. ... 
-    setup: Hold hold_4cdee25724cb4d7491a05c5bbbc6bd59 takes one of ev_103's two seats
-    POST /events/ev_103/reservations key d6c17ce7 -> 409 sold_out
-    POST /events/ev_103/holds key 0cdcb5f8 -> 201 hold_c28c69b7d27c4c42aa92cd3dd5be73f7
-    final ev_103 (Capacity 2): seatsLeft 0; stored Reservations none; pending Holds hold_4cdee25724cb4d7491a05c5bbbc6bd59 held, hold_c28c69b7d27c4c42aa92cd3dd5be73f7 held
+    setup: Hold hold_fcba131fc4b148bcb68c43a382d82b57 takes one of ev_103's two seats
+    POST /events/ev_103/reservations key 04876ed9 -> 409 sold_out
+    POST /events/ev_103/holds key ea102ad4 -> 201 hold_55fad05e09a24a3698b8622c709b167c
+    final ev_103 (Capacity 2): seatsLeft 0; stored Reservations none; pending Holds hold_55fad05e09a24a3698b8622c709b167c held, hold_fcba131fc4b148bcb68c43a382d82b57 held
 ok
 test_a_confirm_and_a_release_racing_on_one_hold_end_it_one_way (test_postgres_races.RaceHttpTests.test_a_confirm_and_a_release_racing_on_one_hold_end_it_one_way)
 Confirm wins (201, then 409 already_confirmed) or release wins (204, then 409 hold_released). ... 
-    setup: Hold hold_5f7daca6ec1e4bcd8fde9402abfe4d51 takes one of ev_103's two seats
-    POST /holds/hold_5f7daca6ec1e4bcd8fde9402abfe4d51/confirm -> 201 res_1
-    DELETE /holds/hold_5f7daca6ec1e4bcd8fde9402abfe4d51 -> 409 already_confirmed
-    final ev_103 (Capacity 2): seatsLeft 1; stored Reservations ['res_1']; pending Holds none
-    final hold_5f7daca6ec1e4bcd8fde9402abfe4d51: confirmed; stored link and released mark ('res_1', False)
+    setup: Hold hold_496bc61800a746c8bcacf606e073095b takes one of ev_103's two seats
+    POST /holds/hold_496bc61800a746c8bcacf606e073095b/confirm -> 409 hold_released
+    DELETE /holds/hold_496bc61800a746c8bcacf606e073095b -> 204 no body
+    final ev_103 (Capacity 2): seatsLeft 2; stored Reservations none; pending Holds none
+    final hold_496bc61800a746c8bcacf606e073095b: released; stored link and released mark (None, True)
 ok
 test_five_distinct_keys_racing_for_two_seats_get_two_holds (test_postgres_races.RaceHttpTests.test_five_distinct_keys_racing_for_two_seats_get_two_holds)
 Two 201s with distinct Hold IDs, three 409 sold_out, and no oversell. ... 
-    POST /events/ev_103/holds key 83eb9561 -> 409 sold_out
-    POST /events/ev_103/holds key d2cebb3a -> 201 hold_186c332e664948628070d20faf0c8fd6
-    POST /events/ev_103/holds key 8f91c8e0 -> 409 sold_out
-    POST /events/ev_103/holds key aafb50fe -> 201 hold_4c727c26d96a42758dd0f8d88d96c2fb
-    POST /events/ev_103/holds key d059e592 -> 409 sold_out
-    final ev_103 (Capacity 2): seatsLeft 0; stored Reservations none; pending Holds hold_186c332e664948628070d20faf0c8fd6 held, hold_4c727c26d96a42758dd0f8d88d96c2fb held
+    POST /events/ev_103/holds key dcd997b9 -> 201 hold_c1ead3af72d94595aaed87f78713406a
+    POST /events/ev_103/holds key 9d9b8d19 -> 409 sold_out
+    POST /events/ev_103/holds key 8d4dd90f -> 201 hold_33b4a123f487401491d28984f3e7f3fa
+    POST /events/ev_103/holds key 03f726b8 -> 409 sold_out
+    POST /events/ev_103/holds key 55516e71 -> 409 sold_out
+    final ev_103 (Capacity 2): seatsLeft 0; stored Reservations none; pending Holds hold_33b4a123f487401491d28984f3e7f3fa held, hold_c1ead3af72d94595aaed87f78713406a held
 ok
 test_one_key_sent_twice_at_once_for_the_last_seat_creates_one_hold (test_postgres_races.RaceHttpTests.test_one_key_sent_twice_at_once_for_the_last_seat_creates_one_hold)
 Both get the same 201 receipt, one marked as a replay, and one Hold is stored. ... 
-    setup: Hold hold_7fb467c7b5a64198a46dc321ed50cce4 takes one of ev_103's two seats
-    POST /events/ev_103/holds key 79916852 -> 201 hold_6073424d39164d1298a51664308c4eb0 (replay)
-    POST /events/ev_103/holds key 79916852 -> 201 hold_6073424d39164d1298a51664308c4eb0
-    final ev_103 (Capacity 2): seatsLeft 0; stored Reservations none; pending Holds hold_6073424d39164d1298a51664308c4eb0 held, hold_7fb467c7b5a64198a46dc321ed50cce4 held
+    setup: Hold hold_e1abcdd7fa2b42d585db332678aff2cc takes one of ev_103's two seats
+    POST /events/ev_103/holds key 417dd60b -> 201 hold_68dfd85485ca47bd806b2b67d7039f9b (replay)
+    POST /events/ev_103/holds key 417dd60b -> 201 hold_68dfd85485ca47bd806b2b67d7039f9b
+    final ev_103 (Capacity 2): seatsLeft 0; stored Reservations none; pending Holds hold_68dfd85485ca47bd806b2b67d7039f9b held, hold_e1abcdd7fa2b42d585db332678aff2cc held
 ok
 
 ----------------------------------------------------------------------
-Ran 4 tests in 1.757s
+Ran 4 tests in 2.104s
 
 OK
 
 == Lock wait: tests/test_postgres_lock_wait.py, on its own new database ==
 test_confirmation_blocked_past_the_deadline_returns_hold_expired (test_postgres_lock_wait.LockWaitHttpTests.test_confirmation_blocked_past_the_deadline_returns_hold_expired)
 Waiting on the lock while live, released after expiresAt: 409, no Reservation. ... 
-    setup: Hold hold_ab2a781415574b2aa424757abfc6440a on ev_103, stored deadline 2026-11-10T20:25:50.290774+00:00
-    2026-11-10T20:25:48.337189+00:00: waiting on the lock: ['SELECT title, capacity FROM events WHERE id = $1 FOR UPDATE']; GET says held
-    2026-11-10T20:25:50.295282+00:00: still waiting on the lock: ['SELECT title, capacity FROM events WHERE id = $1 FOR UPDATE']; releasing it
-    POST /holds/hold_ab2a781415574b2aa424757abfc6440a/confirm -> 409 {'error': 'hold_expired'}
+    setup: Hold hold_d6d988fc630b4621ad0ffbcdee6ccaf9 on ev_103, stored deadline 2026-11-10T22:54:11.805366+00:00
+    2026-11-10T22:54:09.856855+00:00: waiting on the lock: ['SELECT title, capacity FROM events WHERE id = $1 FOR UPDATE']; GET says held
+    2026-11-10T22:54:11.824804+00:00: still waiting on the lock: ['SELECT title, capacity FROM events WHERE id = $1 FOR UPDATE']; releasing it
+    POST /holds/hold_d6d988fc630b4621ad0ffbcdee6ccaf9/confirm -> 409 {'error': 'hold_expired'}
     final ev_103 (Capacity 2): seatsLeft 2; stored Reservations 0; Hold expired
 ok
 
 ----------------------------------------------------------------------
-Ran 1 test in 2.451s
+Ran 1 test in 2.556s
 
 OK
 
