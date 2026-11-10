@@ -27,11 +27,13 @@ _FLASK_ROUTES = {
     "/reservations/<res_id>": "/reservations/{reservationId}",
     "/events/<event_id>/waitlist": "/events/{eventId}/waitlist",
     "/events/<event_id>/waitlist/<entry_id>": "/events/{eventId}/waitlist/{entryId}",
+    "/holds/<hold_id>": "/holds/{holdId}",
 }
 _PARAMETER_NAMES = {
     "event_id": "eventId",
     "res_id": "reservationId",
     "entry_id": "entryId",
+    "hold_id": "holdId",
 }
 
 

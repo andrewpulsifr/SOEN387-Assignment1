@@ -1,9 +1,11 @@
 """Booking and waitlist commands on PostgreSQL, through the service functions.
 
 Checks that event reads count stored reservations, that waitlist positions
-follow join order, that a failed unit of work leaves nothing behind, and that
+follow join order, that a failed unit of work leaves nothing behind, that
 booking, join and leave wait for the event row lock and then see the rival
-transaction's write. Each test seeds its own database; see postgres_support.
+transaction's write, and that a Hold request that waited for the lock judges
+expiry with a clock read after the wait. Each test seeds its own database;
+see postgres_support.
 
 Run from the project root with ENCORE_TEST_DATABASE_URL set:
     python3 -m unittest discover -s tests -p 'test_postgres_booking.py' -v
@@ -17,6 +19,7 @@ from uuid import UUID, uuid4
 import psycopg
 from postgres_support import ServicesOnPostgresTestCase, requires_postgres
 
+import hold_services
 import services
 from postgres_booking import PostgresBookingCommands
 
@@ -116,6 +119,23 @@ class PostgresBookingTests(ServicesOnPostgresTestCase):
             lambda: self.join("ev_102", "gina"),
         )
         self.assertEqual(result[:2], ({"error": "already_on_waitlist"}, 409))
+
+    def test_hold_that_waited_for_the_lock_judges_expiry_after_the_wait(self):
+        """Rival Holds that expire during the lock wait no longer fill ev_103.
+
+        The rival's two Holds expire 0.3 seconds after it locks the row and it
+        commits after more than 0.5 seconds. A clock read when the waiting
+        transaction began would still see them live and answer sold_out.
+        """
+        expiring = ("INSERT INTO holds (id, event_id, created_at, expires_at)"
+                    " SELECT 'hold_rival_' || n, 'ev_103', clock_timestamp(),"
+                    " clock_timestamp() + interval '0.3 seconds'"
+                    " FROM generate_series(1, 2) AS n")
+        result = self.run_while_locked(
+            "ev_103", expiring,
+            lambda: hold_services.create_hold("ev_103", str(uuid4()), b"", None, {}),
+        )
+        self.assertEqual((result[0].get("status"), result[1:]), ("held", (201, False)))
 
     def test_waitlist_leave_waits_for_the_event_row_lock(self):
         entry = self.join("ev_102", "frank")[0]

@@ -3,14 +3,23 @@
 Set ENCORE_TEST_DATABASE_URL to a server URL whose user may create
 databases, for example the Compose server's postgres database. Each test
 gets a new empty database, which is dropped afterwards. Without the variable,
-these tests are skipped.
+these tests are skipped. Test cases here either call the service functions on
+that database or start app.py on it and send HTTP requests.
 """
 
 import os
+import socket
+import subprocess
+import sys
+import time
 import unittest
+import urllib.request
 import uuid
+from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
+import conformance
 import psycopg
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
@@ -20,6 +29,7 @@ import storage
 from postgres_booking import PostgresBookingCommands
 
 ADMIN_URL = os.environ.get("ENCORE_TEST_DATABASE_URL", "")
+APP = Path(__file__).resolve().parents[1] / "app.py"
 
 requires_postgres = unittest.skipUnless(
     ADMIN_URL, "set ENCORE_TEST_DATABASE_URL to run PostgreSQL checks"
@@ -64,6 +74,59 @@ class PostgresTestCase(unittest.TestCase):
             conn.execute(statement)
 
 
+def free_port():
+    """Return a local TCP port that is free right now."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+class AppOnPostgresTestCase(PostgresTestCase):
+    """Start app.py as a process on this test's database and talk to it over HTTP."""
+
+    def app_command(self, *args):
+        """Build the app.py command line for self.port plus extra arguments."""
+        return [sys.executable, str(APP), "--port", str(self.port), *args]
+
+    def app_env(self, env=None):
+        """Return the environment that points app.py at the test database.
+
+        env adds or overrides variables, such as ENCORE_HOLD_TTL_SECONDS.
+        """
+        return {**os.environ, "ENCORE_DATABASE_URL": self.database_url, **(env or {})}
+
+    @contextmanager
+    def running_app(self, *args, env=None):
+        """Start app.py, wait until it serves requests, and kill it afterwards.
+
+        Inside the block the conformance helpers send requests to this app.
+        """
+        self.port = free_port()
+        base = f"http://127.0.0.1:{self.port}"
+        process = subprocess.Popen(self.app_command(*args), env=self.app_env(env),
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        assert process.stdout is not None
+        output = process.stdout
+        try:
+            deadline = time.monotonic() + 15
+            while True:
+                if process.poll() is not None:
+                    self.fail(f"app exited early:\n{output.read().decode()}")
+                try:
+                    urllib.request.urlopen(base + "/events", timeout=1).close()
+                    break
+                except OSError:
+                    if time.monotonic() > deadline:
+                        self.fail("app did not start serving within 15 seconds")
+                    time.sleep(0.1)
+            with patch.object(conformance, "BASE", base):
+                yield
+        finally:
+            process.kill()
+            process.wait(timeout=5)
+            output.close()
+
+
 class ServicesOnPostgresTestCase(PostgresTestCase):
     """Run the service functions on a migrated, freshly seeded database.
 
@@ -76,7 +139,8 @@ class ServicesOnPostgresTestCase(PostgresTestCase):
         super().setUp()
         migrate.migrate(self.database_url)
         migrate.seed_fresh(self.database_url, migrate.FRESH_FIXTURE)
-        for store in (storage.IDEMPOTENCY, storage.RESERVATIONS, storage.WAITLIST):
+        for store in (storage.IDEMPOTENCY, storage.RESERVATIONS, storage.WAITLIST,
+                      storage.HOLDS):
             isolated = patch.dict(store, clear=True)
             isolated.start()
             self.addCleanup(isolated.stop)

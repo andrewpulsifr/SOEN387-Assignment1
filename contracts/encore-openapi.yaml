@@ -3,14 +3,14 @@ info:
   title: Encore
   version: 1.2.0
   description: >
-    Campus event ticketing. v1.2 specifies planned A2 Hold operations before
-    their handlers; publication is not evidence of runtime support. Existing
+    Campus event ticketing. v1.2 adds A2 Hold operations. Hold creation and
+    inspection are implemented; confirmation and release are planned. Existing
     paths and schemas retain the v1.1 contract shapes. New Hold, waitlist and
     error responses may add fields; clients should ignore unknown fields.
     The four original event checks are preserved; full released-v1.0.0
     equivalence remains unverified. Hold validation and recovery rules are
-    documented in this contract. Hold expiry and direct booking will share
-    availability as Capacity minus confirmed Reservations minus live Holds.
+    documented in this contract. Holds and direct booking share availability:
+    Capacity minus confirmed Reservations minus live Holds.
     Missing path segments do not match these operations; router 404s are
     outside their coded-error promises. New Hold rules do not change legacy
     route-specific validation or error mappings.
@@ -382,7 +382,6 @@ paths:
       operationId: createHold
       summary: Hold one available seat
       description: |
-        Planned A2 operation; contract publication does not implement a handler.
         Prefer hold-then-confirm for new clients; direct booking remains available.
         The server assigns a fixed deadline using a configurable TTL (default
         90 seconds). Reads, retries, and restart never extend it.
@@ -446,7 +445,7 @@ paths:
       operationId: getHold
       summary: Fetch a Hold's current effective state
       description: |
-        Planned A2 operation. Safe read of a retained Hold, including terminal
+        Safe read of a retained Hold, including terminal
         Holds. Returns the current effective state, not the creation receipt.
         A Hold is live while unconfirmed, unreleased and now < expiresAt;
         equality is expired. Confirmed Holds remain confirmed after their former

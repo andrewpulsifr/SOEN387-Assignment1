@@ -2,7 +2,7 @@
 
 Checks that MemoryBookingCommands saves a booking and advances the ID
 counter, and that an exception inside a block restores reservations, the
-counter and the waitlist. Also checks that services.create_reservation opens
+counter, the waitlist and Holds. Also checks that services.create_reservation opens
 one unit_of_work() on an injected adapter and propagates failures. These
 in-memory tests do not show PostgreSQL locking or persistence.
 
@@ -13,6 +13,7 @@ Run from the project root:
 import unittest
 from contextlib import contextmanager
 from copy import deepcopy
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -108,6 +109,20 @@ class BookingCommandTests(unittest.TestCase):
 
         with self.commands.snapshot() as repository:
             self.assertEqual(repository.waitlist_entries("ev_103"), [kept])
+
+    def test_failed_unit_of_work_removes_its_hold_and_frees_the_seat(self):
+        """A RuntimeError after save_hold leaves no Hold and ev_103's seat free."""
+        with (self.assertRaisesRegex(RuntimeError, "abort"),
+              self.commands.unit_of_work() as repository):
+            event = repository.get_event("ev_103")
+            assert event is not None
+            repository.save_hold(event.hold("hold_a", timedelta(seconds=90)))
+            self.assertEqual(repository.get_event("ev_103").seats_left, 1)
+            raise RuntimeError("abort")
+
+        with self.commands.snapshot() as repository:
+            self.assertIsNone(repository.get_hold("hold_a"))
+        self.assertEqual(self.seats_left(), 2)
 
     def test_service_uses_unit_of_work_only_adapter(self):
         """The service opens one booking block and saves the reservation."""

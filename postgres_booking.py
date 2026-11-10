@@ -6,20 +6,29 @@ and rolls back if it raises. Inside it, get_event() locks the event row and
 claim_key() locks the key's idempotency_outcomes row until the transaction
 ends, so commands on the same event or key run one at a time.
 snapshot() is a read-only REPEATABLE READ transaction, so every read in it
-sees the same committed state.
+sees the same committed state. The time comes from PostgreSQL's
+clock_timestamp(), one clock for every app process. SQL never decides whether
+a Hold is live; the adapter loads pending Holds and the domain Event judges
+them against that time.
 """
 
+from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any
 
 import psycopg
 from psycopg.types.json import Jsonb
 
-from booking_domain import Event
+from booking_domain import Event, Hold
 from booking_repository import BookingRepository, TransactionAborted
 
 _OUTCOME_FIELDS = ("request_target", "request_hash", "status", "body", "completed_at")
+# Holds not ended by confirmation or release. Whether each is still live
+# depends on the time, which only the domain judges.
+_PENDING_HOLDS = ("SELECT id, event_id, created_at, expires_at FROM holds"
+                  " WHERE reservation_id IS NULL AND released_at IS NULL")
 _RECOGNIZED_ABORTS = (psycopg.errors.SerializationFailure,
                       psycopg.errors.DeadlockDetected)
 
@@ -49,28 +58,59 @@ class PostgresBookingCommands:
 
     @contextmanager
     def snapshot(self) -> Iterator[BookingRepository]:
-        """Run the block in a read-only transaction with one consistent view."""
+        """Run the block in a read-only transaction with one consistent view.
+
+        Its first statement reads the clock. In REPEATABLE READ that statement
+        also fixes the view, so every read and now() describe one moment.
+        """
         with psycopg.connect(self.conninfo) as conn:
             conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
             conn.read_only = True
-            yield _PostgresRepository(conn, lock_events=False)
+            observed_at = _clock(conn)
+            yield _PostgresRepository(conn, lock_events=False, observed_at=observed_at)
+
+
+def _clock(conn: psycopg.Connection) -> datetime:
+    """Read the database's wall-clock time, which every worker shares."""
+    row = conn.execute("SELECT clock_timestamp()").fetchone()
+    assert row is not None
+    return row[0]
+
+
+def _pending_hold(row: tuple) -> Hold:
+    """Build a pending Hold from an id, event_id, created_at, expires_at row."""
+    hold_id, event_id, created_at, expires_at = row
+    return Hold(hold_id, event_id, created_at, expires_at)
 
 
 class _PostgresRepository:
     """Repository calls translated to SQL on one open transaction."""
 
-    def __init__(self, conn: psycopg.Connection, lock_events: bool):
-        """Use conn's open transaction; lock_events makes get_event() lock rows."""
+    def __init__(self, conn: psycopg.Connection, lock_events: bool,
+                 observed_at: datetime | None = None):
+        """Use conn's open transaction; lock_events makes get_event() lock rows.
+
+        observed_at fixes now() for a snapshot; without it now() reads the clock.
+        """
         self._conn = conn
         self._lock_events = lock_events
+        self._observed_at = observed_at
+
+    def now(self) -> datetime:
+        """Return the snapshot's time, or a fresh clock reading in a unit of work."""
+        if self._observed_at is not None:
+            return self._observed_at
+        return _clock(self._conn)
 
     def get_event(self, event_id: str) -> Event | None:
         """Load the Event, locking its row first in a unit of work.
 
-        Occupancy is counted in a second statement, after the lock is held, so
-        it includes bookings committed by the previous lock holder. A count
-        inside the locking statement would use the state from before any lock
-        wait and could allow an oversell.
+        Occupancy and pending Holds are read in later statements, after the
+        lock is held, so they include what the previous lock holder committed.
+        A count inside the locking statement would use the state from before
+        any lock wait and could allow an oversell. The clock is read last, in
+        its own query, so a command that waited judges expiry at the time it
+        decides, not when its transaction began.
         """
         lock = " FOR UPDATE" if self._lock_events else ""
         row = self._conn.execute(
@@ -82,7 +122,11 @@ class _PostgresRepository:
         confirmed = self._scalar(
             "SELECT count(*) FROM reservations WHERE event_id = %s", (event_id,)
         )
-        return Event(event_id, capacity, confirmed, title=title)
+        holds = [_pending_hold(hold_row) for hold_row in self._conn.execute(
+            _PENDING_HOLDS + " AND event_id = %s", (event_id,)
+        )]
+        return Event(event_id, capacity, confirmed, title=title, holds=holds,
+                     now=self.now())
 
     def next_reservation_id(self) -> str:
         """Take the next res_N number; a rollback returns it to the counter."""
@@ -113,14 +157,41 @@ class _PostgresRepository:
         return dict(zip(("id", "eventId", "status", "createdAt"), row))
 
     def list_events(self) -> list[Event]:
-        """Load every Event and its occupancy in one statement, ordered by ID."""
+        """Load every Event, its occupancy and pending Holds, ordered by ID."""
         rows = self._conn.execute(
             "SELECT e.id, e.title, e.capacity, count(r.id)"
             " FROM events e LEFT JOIN reservations r ON r.event_id = e.id"
             " GROUP BY e.id ORDER BY e.id"
         ).fetchall()
-        return [Event(event_id, capacity, confirmed, title=title)
+        holds_by_event = defaultdict(list)
+        for hold_row in self._conn.execute(_PENDING_HOLDS):
+            hold = _pending_hold(hold_row)
+            holds_by_event[hold.event_id].append(hold)
+        now = self.now()
+        return [Event(event_id, capacity, confirmed, title=title,
+                      holds=holds_by_event[event_id], now=now)
                 for event_id, title, capacity, confirmed in rows]
+
+    def save_hold(self, hold: Hold) -> None:
+        """Insert the Hold row with its fixed deadline."""
+        self._conn.execute(
+            "INSERT INTO holds (id, event_id, created_at, expires_at)"
+            " VALUES (%s, %s, %s, %s)",
+            (hold.id, hold.event_id, hold.created_at, hold.expires_at),
+        )
+
+    def get_hold(self, hold_id: str) -> Hold | None:
+        """Return the stored Hold with its confirmation and release state, or None."""
+        row = self._conn.execute(
+            "SELECT id, event_id, created_at, expires_at, reservation_id,"
+            " released_at IS NOT NULL FROM holds WHERE id = %s",
+            (hold_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        hold_id, event_id, created_at, expires_at, reservation_id, released = row
+        return Hold(hold_id, event_id, created_at, expires_at,
+                    reservation_id=reservation_id, released=released)
 
     def waitlist_entries(self, event_id: str) -> list[dict[str, str]]:
         """Return the event's waitlist entries in join order."""

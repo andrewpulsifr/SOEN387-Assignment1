@@ -1,19 +1,21 @@
 """In-memory implementation of the booking repository protocols.
 
-It wraps the process-local dicts in storage.py, including the stored replay
-outcomes, and is the test double for the PostgreSQL adapter. One lock lets a
-single block run at a time across all events and keys, and a command block
-that raises restores the dicts to their state at entry. State lives only in
-this process and is lost on restart. It never raises TransactionAborted.
+It wraps the process-local dicts in storage.py, including Holds and the
+stored replay outcomes, and is the test double for the PostgreSQL adapter.
+One lock lets a single block run at a time across all events and keys, and a
+command block that raises restores the dicts to their state at entry. Its
+clock is this process's UTC time. State lives only in this process and is
+lost on restart. It never raises TransactionAborted.
 """
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from copy import deepcopy
+from copy import copy, deepcopy
+from datetime import datetime, timezone
 from threading import RLock
 from typing import Any
 
-from booking_domain import Event
+from booking_domain import Event, Hold
 from booking_repository import BookingRepository
 
 
@@ -26,11 +28,12 @@ class MemoryBookingCommands:
     def __init__(self, events: dict[str, dict], capacities: dict[str, int],
                  reservations: dict[str, dict], next_number: dict[str, int],
                  waitlist: dict[str, list[dict]] | None = None,
-                 outcomes: dict[str, dict] | None = None):
+                 outcomes: dict[str, dict] | None = None,
+                 holds: dict[str, Hold] | None = None):
         """Keep references to the dicts without copying them.
 
-        waitlist and outcomes (idempotency key -> stored outcome) default to
-        new dicts.
+        waitlist, outcomes (idempotency key -> stored outcome) and holds
+        default to new dicts.
         """
         self.events = events
         self.capacities = capacities
@@ -38,6 +41,7 @@ class MemoryBookingCommands:
         self.next_number = next_number
         self.waitlist = {} if waitlist is None else waitlist
         self.outcomes = {} if outcomes is None else outcomes
+        self.holds = {} if holds is None else holds
         self._lock = RLock()
 
     @contextmanager
@@ -45,27 +49,23 @@ class MemoryBookingCommands:
         """Open an atomic command block and yield this object as the repository.
 
         On success the changes stay. On any exception (including
-        KeyboardInterrupt) reservations, the ID counter, the waitlist and the
-        stored outcomes go back to their state at entry, then the exception is
-        re-raised. Events and Capacities are never written by a command, so
-        they are not copied.
+        KeyboardInterrupt) reservations, the ID counter, the waitlist, the
+        Holds and the stored outcomes go back to their state at entry, then
+        the exception is re-raised. Events and Capacities are never written
+        by a command, so they are not copied.
         """
         with self._lock:
-            reservations_before = deepcopy(self.reservations)
-            next_before = self.next_number.copy()
-            waitlist_before = deepcopy(self.waitlist)
-            outcomes_before = deepcopy(self.outcomes)
+            stores: tuple[dict[str, Any], ...] = (
+                self.reservations, self.next_number, self.waitlist, self.holds,
+                self.outcomes,
+            )
+            before = [deepcopy(store) for store in stores]
             try:
                 yield self
             except BaseException:
-                self.reservations.clear()
-                self.reservations.update(reservations_before)
-                self.next_number.clear()
-                self.next_number.update(next_before)
-                self.waitlist.clear()
-                self.waitlist.update(waitlist_before)
-                self.outcomes.clear()
-                self.outcomes.update(outcomes_before)
+                for store, saved in zip(stores, before):
+                    store.clear()
+                    store.update(saved)
                 raise
 
     @contextmanager
@@ -74,16 +74,26 @@ class MemoryBookingCommands:
         with self._lock:
             yield self
 
+    def now(self) -> datetime:
+        """Return this process's UTC time; the lock keeps state still between reads."""
+        return datetime.now(timezone.utc)
+
     def get_event(self, event_id: str) -> Event | None:
-        """Return the Event with occupancy counted from stored reservations, or None."""
+        """Return the Event observed now, or None."""
         if event_id not in self.events:
             return None
+        return self._event_at(event_id, self.now())
+
+    def _event_at(self, event_id: str, now: datetime) -> Event:
+        """Build the Event from stored reservations and Holds, observed at now."""
         confirmed = sum(
             reservation["eventId"] == event_id
             for reservation in self.reservations.values()
         )
+        holds = [copy(hold) for hold in self.holds.values()
+                 if hold.event_id == event_id]
         return Event(event_id, self.capacities[event_id], confirmed,
-                     title=self.events[event_id]["title"])
+                     title=self.events[event_id]["title"], holds=holds, now=now)
 
     def get_reservation(self, reservation_id: str) -> dict[str, str] | None:
         """Return a copy of the stored reservation, or None."""
@@ -91,9 +101,18 @@ class MemoryBookingCommands:
         return None if reservation is None else reservation.copy()
 
     def list_events(self) -> list[Event]:
-        """Return every Event, ordered by ID."""
-        return [event for event_id in sorted(self.events)
-                if (event := self.get_event(event_id)) is not None]
+        """Return every Event observed at one time, ordered by ID."""
+        now = self.now()
+        return [self._event_at(event_id, now) for event_id in sorted(self.events)]
+
+    def save_hold(self, hold: Hold) -> None:
+        """Store a copy of the Hold."""
+        self.holds[hold.id] = copy(hold)
+
+    def get_hold(self, hold_id: str) -> Hold | None:
+        """Return a copy of the stored Hold, or None."""
+        hold = self.holds.get(hold_id)
+        return None if hold is None else copy(hold)
 
     def waitlist_entries(self, event_id: str) -> list[dict[str, str]]:
         """Return copies of the event's entries in join order."""

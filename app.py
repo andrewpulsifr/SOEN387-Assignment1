@@ -7,11 +7,13 @@ app without running main(), so they skip migrations and use process memory.
 import argparse
 import os
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import psycopg
 from flask import Flask, send_from_directory
 
+import hold_services
 import migrate
 import storage
 from postgres_booking import PostgresBookingCommands
@@ -70,6 +72,21 @@ def _parse_args(argv):
     return parser.parse_args(argv)
 
 
+def _hold_ttl(environ):
+    """Read ENCORE_HOLD_TTL_SECONDS (default 90) as a whole number of seconds.
+
+    A value that is not a positive whole number prints to stderr and exits
+    with status 1, before the database is touched.
+    """
+    raw = environ.get("ENCORE_HOLD_TTL_SECONDS", "90")
+    seconds = int(raw) if raw.isdigit() else 0
+    if seconds < 1:
+        print(f"Startup stopped: ENCORE_HOLD_TTL_SECONDS must be a positive whole"
+              f" number of seconds, got {raw!r}", file=sys.stderr)
+        raise SystemExit(1)
+    return timedelta(seconds=seconds)
+
+
 def _prepare_database(database_url, seed_fresh):
     """Apply pending migrations, seed if asked, and print what happened.
 
@@ -95,12 +112,16 @@ def main(argv=None):
     """Migrate the database, seed it if asked, then serve the API on PostgreSQL.
 
     ENCORE_DATABASE_URL selects the database (default: the local `encore`
-    database). A database error while migrating or seeding stops startup with
-    exit status 1 before the server starts.
+    database) and ENCORE_HOLD_TTL_SECONDS the Hold TTL (default 90). An
+    invalid TTL, or a database error while migrating or seeding, stops
+    startup with exit status 1 before the server starts.
     """
     args = _parse_args(argv)
+    hold_services.HOLD_TTL = _hold_ttl(os.environ)
     database_url = os.environ.get("ENCORE_DATABASE_URL", DEFAULT_DATABASE_URL)
     _prepare_database(database_url, args.seed_fresh)
+    print(f"Hold TTL: {int(hold_services.HOLD_TTL.total_seconds())} seconds",
+          flush=True)
 
     # Replace the in-memory default in storage.py; services read this global on every call.
     storage.BOOKING_COMMANDS = PostgresBookingCommands(database_url)

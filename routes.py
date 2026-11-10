@@ -2,6 +2,7 @@ import time
 
 from flask import Blueprint, jsonify, request
 
+import hold_services
 import services
 import validation
 
@@ -53,6 +54,11 @@ def create_reservation(event_id):
             time.sleep(3)      # the work is DONE; only the reply is delayed past
                                # the client's timeout -- Chapter 1's third state.
 
+    return _keyed_response(body, status, replayed)
+
+
+def _keyed_response(body, status, replayed):
+    """Build a keyed POST response; a replay carries Idempotency-Replayed: true."""
     response = jsonify(body)
     if replayed:
         response.headers["Idempotency-Replayed"] = "true"
@@ -72,10 +78,7 @@ def join_waitlist(event_id):
     body, status, replayed = services.join_waitlist(
         event_id, key, body_bytes, request.mimetype
     )
-    response = jsonify(body)
-    if replayed:
-        response.headers["Idempotency-Replayed"] = "true"
-    return response, status
+    return _keyed_response(body, status, replayed)
 
 @api_routes.get("/events/<event_id>/waitlist")
 def get_waitlist_entries(event_id):
@@ -93,4 +96,22 @@ def leave_waitlist(event_id, entry_id):
     body, status = services.leave_waitlist(event_id, entry_id)
     if status == 204:
         return "", status
+    return jsonify(body), status
+
+
+@api_routes.post("/events/<event_id>/holds")
+def create_hold(event_id):
+    """Hold one seat; without a key the body is ignored and nothing is stored."""
+    key = request.headers.get("Idempotency-Key")
+    body_bytes = request.get_data() if key else b""
+    body, status, replayed = hold_services.create_hold(
+        event_id, key, body_bytes, request.mimetype, request.args
+    )
+    return _keyed_response(body, status, replayed)
+
+
+@api_routes.get("/holds/<hold_id>")
+def get_hold(hold_id):
+    """Show a Hold; the service rejects any query or body, as the contract requires."""
+    body, status = hold_services.get_hold(hold_id, request.args, request.get_data())
     return jsonify(body), status

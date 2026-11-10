@@ -1,9 +1,9 @@
-"""The storage boundary for events, reservations, waitlists and replay outcomes.
+"""The storage boundary for events, reservations, Holds, waitlists and replay outcomes.
 
-Services ask a repository for domain Events, reservation IDs, stored
-reservations, waitlist entries and the stored outcomes of keyed POST requests.
-Adapters own the storage details behind those calls; memory_booking.py and
-postgres_booking.py implement them.
+Services ask a repository for domain Events and Holds, reservation IDs, stored
+reservations, waitlist entries, the stored outcomes of keyed POST requests and
+the current time. Adapters own the storage details and the clock behind those
+calls; memory_booking.py and postgres_booking.py implement them.
 
 A Unit of Work is one atomic command block: every read, ID allocation and
 write inside it succeeds together, or the block leaves no trace. Once a block
@@ -13,9 +13,10 @@ reads all see one consistent state.
 """
 
 from contextlib import AbstractContextManager
+from datetime import datetime
 from typing import Any, Protocol
 
-from booking_domain import Event
+from booking_domain import Event, Hold
 
 
 class TransactionAborted(Exception):
@@ -30,11 +31,30 @@ class BookingRepository(Protocol):
     """The operations a command or snapshot block offers the services."""
 
     def get_event(self, event_id: str) -> Event | None:
-        """Load an Event with its Capacity and confirmed occupancy, or None.
+        """Load an Event with its Capacity, occupancy and pending Holds, or None.
 
-        Inside a unit of work this also claims the event for the rest of the
-        block, so the occupancy stays current until the block ends.
+        Pending Holds are those not confirmed or released. The Event is
+        observed at now(), so it can tell live Holds from expired ones. Inside
+        a unit of work this first claims the event for the rest of the block,
+        then reads the clock, so a command that waited for the claim judges
+        expiry at the time it actually runs.
         """
+        ...
+
+    def now(self) -> datetime:
+        """Return the block's current time from the shared clock.
+
+        In a snapshot this is the moment its reads were fixed, so every read
+        and the time agree. In a unit of work each call reads the clock again.
+        """
+        ...
+
+    def save_hold(self, hold: Hold) -> None:
+        """Store a Hold that event.hold() just created."""
+        ...
+
+    def get_hold(self, hold_id: str) -> Hold | None:
+        """Return a copy of a stored Hold, or None."""
         ...
 
     def next_reservation_id(self) -> str:
@@ -50,7 +70,7 @@ class BookingRepository(Protocol):
         ...
 
     def list_events(self) -> list[Event]:
-        """Load every Event with its Capacity and confirmed occupancy, ordered by ID."""
+        """Load every Event like get_event(), all observed at one time, ordered by ID."""
         ...
 
     def waitlist_entries(self, event_id: str) -> list[dict[str, str]]:

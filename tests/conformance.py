@@ -15,9 +15,13 @@ spec = yaml.safe_load(CONTRACT.read_text())
 # ---------------Shared helpers -----------------------
 def schema_for(path, method, status):
     """Pull a response schema out of the OpenAPI document, and carry the
-    components along so that $ref: '#/components/schemas/...' resolves."""
+    components along so that $ref: '#/components/schemas/...' resolves.
+    A response given as $ref: '#/components/responses/...' is followed first."""
     op = spec["paths"][path][method]
-    schema = op["responses"][status]["content"]["application/json"]["schema"]
+    response = op["responses"][status]
+    if "$ref" in response:
+        response = spec["components"]["responses"][response["$ref"].rsplit("/", 1)[1]]
+    schema = response["content"]["application/json"]["schema"]
     return {**schema, "components": spec["components"]}
 
 def get(path):
@@ -36,12 +40,18 @@ def post_with_headers(path, body, key=None):
     headers = {"Content-Type": "application/json"}
     if key is not None:
         headers["Idempotency-Key"] = key
+    return send("POST", path, body, headers)
 
+def send(method, path, body=None, headers=None):
+    """Send exactly these body bytes and headers; return (status, JSON body, headers).
+
+    body=None sends no body at all, and no Content-Type unless headers has one.
+    """
     request = urllib.request.Request(
         BASE + path,
         data=body,
-        headers=headers,
-        method="POST",
+        headers=headers or {},
+        method=method,
     )
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
