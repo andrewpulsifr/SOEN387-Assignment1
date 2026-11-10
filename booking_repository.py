@@ -65,6 +65,10 @@ class BookingRepository(Protocol):
         """Store a reservation that event.book() just created."""
         ...
 
+    def save_confirmation(self, hold: Hold, reservation: dict[str, str]) -> None:
+        """Store the reservation that event.confirm() created and the Hold's link to it."""
+        ...
+
     def get_reservation(self, reservation_id: str) -> dict[str, str] | None:
         """Return a copy of a stored reservation, or None."""
         ...

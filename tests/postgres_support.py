@@ -4,7 +4,8 @@ Set ENCORE_TEST_DATABASE_URL to a server URL whose user may create
 databases, for example the Compose server's postgres database. Each test
 gets a new empty database, which is dropped afterwards. Without the variable,
 these tests are skipped. Test cases here either call the service functions on
-that database or start app.py on it and send HTTP requests.
+that database or start app.py on it and send HTTP requests. A test can also
+make reservation INSERTs fail with a chosen SQLSTATE to exercise retries.
 """
 
 import os
@@ -72,6 +73,28 @@ class PostgresTestCase(unittest.TestCase):
         """Run SQL without parameters in its own committed transaction."""
         with psycopg.connect(self.database_url) as conn:
             conn.execute(statement)
+
+    def fail_reservation_inserts(self, sqlstate, times):
+        """Make the next `times` reservation INSERTs raise `sqlstate` inside PostgreSQL.
+
+        A sequence counts the attempts, since nextval() survives a rollback.
+        """
+        self.execute(f"""
+            CREATE SEQUENCE insert_attempts;
+            CREATE FUNCTION fail_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF nextval('insert_attempts') <= {times} THEN
+                    RAISE EXCEPTION 'injected' USING ERRCODE = '{sqlstate}';
+                END IF;
+                RETURN NEW;
+            END $$;
+            CREATE TRIGGER fail_insert BEFORE INSERT ON reservations
+                FOR EACH ROW EXECUTE FUNCTION fail_insert();
+        """)
+
+    def insert_attempts(self):
+        """Return how many reservation INSERTs the trigger has seen."""
+        return self.query("SELECT last_value FROM insert_attempts")[0][0]
 
 
 def free_port():

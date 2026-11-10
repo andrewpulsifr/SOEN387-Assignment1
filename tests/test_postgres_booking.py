@@ -3,9 +3,9 @@
 Checks that event reads count stored reservations, that waitlist positions
 follow join order, that a failed unit of work leaves nothing behind, that
 booking, join and leave wait for the event row lock and then see the rival
-transaction's write, and that a Hold request that waited for the lock judges
-expiry with a clock read after the wait. Each test seeds its own database;
-see postgres_support.
+transaction's write, and that Hold creation and confirmation that waited for
+the lock judge expiry with a clock read after the wait. Each test seeds its
+own database; see postgres_support.
 
 Run from the project root with ENCORE_TEST_DATABASE_URL set:
     python3 -m unittest discover -s tests -p 'test_postgres_booking.py' -v
@@ -13,6 +13,7 @@ Run from the project root with ENCORE_TEST_DATABASE_URL set:
 
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
@@ -136,6 +137,22 @@ class PostgresBookingTests(ServicesOnPostgresTestCase):
             lambda: hold_services.create_hold("ev_103", str(uuid4()), b"", None, {}),
         )
         self.assertEqual((result[0].get("status"), result[1:]), ("held", (201, False)))
+
+    def test_confirm_that_waited_for_the_lock_judges_expiry_after_the_wait(self):
+        """A Hold live when confirmation began, but expired during its lock wait, fails.
+
+        The Hold lasts 0.3 seconds and the rival commits after more than 0.5
+        seconds. A clock read when the confirming transaction began would
+        still see the Hold live and confirm it.
+        """
+        with patch.object(hold_services, "HOLD_TTL", timedelta(seconds=0.3)):
+            hold_id = hold_services.create_hold("ev_103", str(uuid4()), b"", None,
+                                                {})[0]["id"]
+        result = self.run_while_locked(
+            "ev_103", None, lambda: hold_services.confirm_hold(hold_id, {}, b""),
+        )
+        self.assertEqual(result, ({"error": "hold_expired"}, 409))
+        self.assertEqual(services.get_event("ev_103")[0]["seatsLeft"], 2)
 
     def test_waitlist_leave_waits_for_the_event_row_lock(self):
         entry = self.join("ev_102", "frank")[0]

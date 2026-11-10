@@ -141,6 +141,11 @@ class MemoryBookingCommands:
         """Store a copy of the reservation."""
         self.reservations[reservation["id"]] = reservation.copy()
 
+    def save_confirmation(self, hold: Hold, reservation: dict[str, str]) -> None:
+        """Store copies of the reservation and of the Hold that now links to it."""
+        self.reservations[reservation["id"]] = reservation.copy()
+        self.holds[hold.id] = copy(hold)
+
     def claim_key(self, key: str, request_target: str,
                   request_hash: str) -> dict[str, Any] | None:
         """Return a copy of the key's stored outcome, or None if it has none.

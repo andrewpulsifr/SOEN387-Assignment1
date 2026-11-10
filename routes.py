@@ -115,3 +115,11 @@ def get_hold(hold_id):
     """Show a Hold; the service rejects any query or body, as the contract requires."""
     body, status = hold_services.get_hold(hold_id, request.args, request.get_data())
     return jsonify(body), status
+
+
+@api_routes.post("/holds/<hold_id>/confirm")
+def confirm_hold(hold_id):
+    """Confirm a Hold; a supplied Idempotency-Key is ignored."""
+    body, status = hold_services.confirm_hold(hold_id, request.args,
+                                              request.get_data())
+    return jsonify(body), status

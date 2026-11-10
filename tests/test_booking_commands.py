@@ -2,9 +2,10 @@
 
 Checks that MemoryBookingCommands saves a booking and advances the ID
 counter, and that an exception inside a block restores reservations, the
-counter, the waitlist and Holds. Also checks that services.create_reservation opens
-one unit_of_work() on an injected adapter and propagates failures. These
-in-memory tests do not show PostgreSQL locking or persistence.
+counter, the waitlist, Holds and a confirmation's link. Also checks that
+services.create_reservation opens one unit_of_work() on an injected adapter
+and propagates failures. These in-memory tests do not show PostgreSQL
+locking or persistence.
 
 Run from the project root:
     python3 -m unittest discover -s tests -p 'test_booking*.py' -v
@@ -123,6 +124,35 @@ class BookingCommandTests(unittest.TestCase):
         with self.commands.snapshot() as repository:
             self.assertIsNone(repository.get_hold("hold_a"))
         self.assertEqual(self.seats_left(), 2)
+
+    def test_confirmation_keeps_the_seat_and_a_failed_block_undoes_it(self):
+        """A RuntimeError after save_confirmation leaves the Hold live; a clean block links it."""
+        with self.commands.unit_of_work() as repository:
+            event = repository.get_event("ev_103")
+            assert event is not None
+            repository.save_hold(event.hold("hold_a", timedelta(seconds=90)))
+
+        def confirm(repository):
+            """Confirm hold_a the way the service does and return the reservation."""
+            event, hold = repository.get_event("ev_103"), repository.get_hold("hold_a")
+            reservation = event.confirm(hold, repository.next_reservation_id(), "x")
+            repository.save_confirmation(hold, reservation)
+            return reservation
+
+        with (self.assertRaisesRegex(RuntimeError, "abort"),
+              self.commands.unit_of_work() as repository):
+            confirm(repository)
+            raise RuntimeError("abort")
+        with self.commands.snapshot() as repository:
+            self.assertIsNone(repository.get_hold("hold_a").reservation_id)
+        self.assertEqual((self.reservations, self.seats_left()), ({}, 1))
+
+        with self.commands.unit_of_work() as repository:
+            reservation = confirm(repository)
+        with self.commands.snapshot() as repository:
+            self.assertEqual(repository.get_hold("hold_a").reservation_id, "res_1")
+        self.assertEqual((self.reservations, self.seats_left()),
+                         ({"res_1": reservation}, 1))
 
     def test_service_uses_unit_of_work_only_adapter(self):
         """The service opens one booking block and saves the reservation."""

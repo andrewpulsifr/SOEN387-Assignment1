@@ -5,11 +5,11 @@ A Flask implementation of the Encore event and waitlist API.
 ## Current implementation and Assignment 2 status
 
 Events, immediate reservations, waitlist join/list/lookup/leave, and Hold
-creation (`POST /events/{eventId}/holds`) and inspection (`GET /holds/{holdId}`)
-are implemented and stored in PostgreSQL, together with the replay outcomes of
-keyed requests. The [OpenAPI contract](contracts/encore-openapi.yaml) also
-specifies Hold confirmation (`POST /holds/{holdId}/confirm`) and release
-(`DELETE /holds/{holdId}`); those two handlers are not implemented yet.
+creation (`POST /events/{eventId}/holds`), inspection (`GET /holds/{holdId}`)
+and confirmation (`POST /holds/{holdId}/confirm`) are implemented and stored
+in PostgreSQL, together with the replay outcomes of keyed requests. The
+[OpenAPI contract](contracts/encore-openapi.yaml) also specifies Hold release
+(`DELETE /holds/{holdId}`); that handler is not implemented yet.
 
 ## Assignment deliverables
 
@@ -77,8 +77,8 @@ Run focused idempotency checks with:
 python3 -m unittest discover -s tests -p 'test_idempotency.py' -v
 ```
 
-Run the domain checks (Event availability, the Hold lifecycle and its
-deadline rounding) and the in-memory booking block checks with:
+Run the domain checks (Event availability, the Hold lifecycle, its deadline
+rounding and confirmation) and the in-memory booking block checks with:
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_booking*.py' -v
@@ -101,15 +101,17 @@ ENCORE_TEST_DATABASE_URL=postgresql://encore:encore@localhost:5432/postgres \
 Each test creates its own database on that server and drops it afterwards.
 They cover the migration runner (including the upgrade from migration one to
 two), the PostgreSQL adapter through the service functions (row locking,
-waitlist order, rollback, ID allocation, and expiry judged after a lock wait),
-durable replay (stored errors, key conflicts, same-key contention, the 24-hour
-boundary on an injected clock, and abort retries), and `app.py` started as a
-process: replay after a restart, a failed migration, an invalid Hold TTL, and
-the Hold checks in `tests/test_postgres_holds.py`. Those send HTTP requests
-through the conformance helpers and check receipts, the current view, coded
-errors, live Holds filling an event for both booking paths and the waitlist,
-and expiry with a 2-second TTL. Without `ENCORE_TEST_DATABASE_URL` these tests
-are skipped.
+waitlist order, rollback, ID allocation, and expiry judged after a lock wait
+for Hold creation and confirmation), durable replay (stored errors, key
+conflicts, same-key contention, the 24-hour boundary on an injected clock, and
+abort retries), and `app.py` started as a process: replay after a restart, a
+failed migration, an invalid Hold TTL, and the Hold checks in
+`tests/test_postgres_holds.py` and `tests/test_postgres_confirm.py`. Those
+send HTTP requests through the conformance helpers and check receipts, the
+current view, coded errors, live Holds filling an event for both booking paths
+and the waitlist, expiry with a 2-second TTL, and first and repeated
+confirmation at full allocation. Without `ENCORE_TEST_DATABASE_URL` these
+tests are skipped.
 
 To check booking against a running server, including recovery when a reply is
 lost, run `python3 tests/direct_booking_smoke.py` once on freshly seeded data,
@@ -163,10 +165,22 @@ retries and restarts never move the deadline. Time comes from PostgreSQL's
 so the state and the time match. A command reads it after locking the event,
 so a request that waited for the lock judges expiry when it runs.
 
-Booking, Hold creation, waitlist join and waitlist leave each lock their
-event's row with `SELECT ... FOR UPDATE` at the start of their transaction, so
-commands on the same event run one at a time. The lock ends when the
-transaction commits or rolls back. Reads run in one read-only
+`POST /holds/{holdId}/confirm` turns a live Hold into a reservation. In one
+transaction it finds the Hold's event, locks it, reads the Hold again, then
+stores one reservation and the Hold's `reservationId` link together. The
+Hold's seat passes to the reservation, so `seatsLeft` does not change and a
+full event can still confirm its Holds. The first confirmation returns 201
+with the reservation; a repeat returns 200 with the same one, even after the
+old deadline. An expired Hold, including one that expired while its request
+waited for the lock, gives 409 `hold_expired` and changes nothing. A released
+Hold gives 409 `hold_released`, though nothing can release a Hold until the
+release handler exists. Confirmation needs no `Idempotency-Key` and ignores
+one if sent.
+
+Booking, Hold creation and confirmation, waitlist join and waitlist leave
+each lock their event's row with `SELECT ... FOR UPDATE` before reading the
+state they decide on, so commands on the same event run one at a time. The
+lock ends when the transaction commits or rolls back. Reads run in one read-only
 `REPEATABLE READ` transaction, so a response never mixes two states. Waitlist
 positions follow a join order the database assigns, independent of the random
 entry IDs, and a user can appear on an event's waitlist only once. A booking
@@ -204,7 +218,9 @@ A transaction that PostgreSQL aborts with a serialization failure (SQLSTATE
 `40001`) or a detected deadlock (`40P01`) has been rolled back completely, so
 the whole request runs again, up to 3 attempts in all with no delay. After the
 third abort the API returns 503 `service_unavailable` and stores nothing;
-the client should retry with the same key, endpoint and body bytes. Every other
+the client should retry with the same key, endpoint and body bytes. Hold
+confirmation follows the same retry rule; after its 503 the client can GET the
+Hold or confirm again. Every other
 database error, including a connection lost during commit, is not retried and
 returns a server error, because the work may or may not have committed. The
 client recovers the same way: the same key replays the outcome if the work

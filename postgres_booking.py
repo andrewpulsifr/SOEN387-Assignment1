@@ -31,6 +31,8 @@ _PENDING_HOLDS = ("SELECT id, event_id, created_at, expires_at FROM holds"
                   " WHERE reservation_id IS NULL AND released_at IS NULL")
 _RECOGNIZED_ABORTS = (psycopg.errors.SerializationFailure,
                       psycopg.errors.DeadlockDetected)
+_INSERT_RESERVATION = ("INSERT INTO reservations (id, event_id, status, created_at)"
+                       " VALUES (%(id)s, %(eventId)s, %(status)s, %(createdAt)s)")
 
 
 class PostgresBookingCommands:
@@ -139,12 +141,16 @@ class _PostgresRepository:
 
     def save_reservation(self, event: Event, reservation: dict[str, str]) -> None:
         """Insert the reservation row."""
-        self._conn.execute(
-            "INSERT INTO reservations (id, event_id, status, created_at)"
-            " VALUES (%s, %s, %s, %s)",
-            (reservation["id"], reservation["eventId"], reservation["status"],
-             reservation["createdAt"]),
-        )
+        self._conn.execute(_INSERT_RESERVATION, reservation)
+
+    def save_confirmation(self, hold: Hold, reservation: dict[str, str]) -> None:
+        """Insert the reservation row, then link it from the Hold's row.
+
+        The reservation goes first because holds.reservation_id references it.
+        """
+        self._conn.execute(_INSERT_RESERVATION, reservation)
+        self._conn.execute("UPDATE holds SET reservation_id = %s WHERE id = %s",
+                           (hold.reservation_id, hold.id))
 
     def get_reservation(self, reservation_id: str) -> dict[str, str] | None:
         """Return the stored reservation, or None."""

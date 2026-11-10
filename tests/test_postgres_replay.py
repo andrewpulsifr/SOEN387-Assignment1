@@ -148,28 +148,6 @@ class PostgresReplayTests(ServicesOnPostgresTestCase):
         self.assertEqual([self.seats_left(event) for event in ("ev_101", "ev_103")],
                          [41, 1])
 
-    def fail_reservation_inserts(self, sqlstate, times):
-        """Make the next `times` reservation INSERTs raise `sqlstate` inside PostgreSQL.
-
-        A sequence counts the attempts, since nextval() survives a rollback.
-        """
-        self.execute(f"""
-            CREATE SEQUENCE insert_attempts;
-            CREATE FUNCTION fail_insert() RETURNS trigger LANGUAGE plpgsql AS $$
-            BEGIN
-                IF nextval('insert_attempts') <= {times} THEN
-                    RAISE EXCEPTION 'injected' USING ERRCODE = '{sqlstate}';
-                END IF;
-                RETURN NEW;
-            END $$;
-            CREATE TRIGGER fail_insert BEFORE INSERT ON reservations
-                FOR EACH ROW EXECUTE FUNCTION fail_insert();
-        """)
-
-    def insert_attempts(self):
-        """Return how many reservation INSERTs the trigger has seen."""
-        return self.query("SELECT last_value FROM insert_attempts")[0][0]
-
     def test_recognized_aborts_retry_the_whole_command(self):
         """Serialization failures and deadlocks rerun the command up to the bound."""
         attempts = idempotency.MAX_COMMAND_ATTEMPTS

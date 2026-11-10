@@ -1,4 +1,4 @@
-"""Replay saved outcomes of keyed POST requests.
+"""Replay saved outcomes of keyed POST requests, and retry aborted commands.
 
 Keys share one global namespace. Each keyed command runs in one unit of work
 from the booking adapter: claiming the key, the operation's writes and the
@@ -7,11 +7,12 @@ operation locks any event. Outcomes stay replayable for 24 hours after the
 operation completes, measured on this process's UTC clock, and survive
 restarts on PostgreSQL.
 
-A command that the adapter reports as TransactionAborted runs again from the
-start, up to MAX_COMMAND_ATTEMPTS times in all, with no delay between attempts.
-After the last abort the caller gets 503 service_unavailable, and nothing is
-stored, so the same key can be retried. Other errors propagate on the first
-attempt.
+run_command() runs each keyed command and each Hold confirmation. A command
+that the adapter reports as TransactionAborted runs again from the start, up
+to MAX_COMMAND_ATTEMPTS times in all, with no delay between attempts. After
+the last abort the caller gets 503 service_unavailable, and nothing is
+stored, so the same request can be retried. Other errors propagate on the
+first attempt.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -47,16 +48,37 @@ def execute_idempotently(key, body_bytes, request_target, operation,
     if not key:
         return {"error": "idempotency_key_required"}, 422, False
 
-    commands = storage.BOOKING_COMMANDS if commands is None else commands
     request_hash = hashlib.sha256(body_bytes).hexdigest()
+    try:
+        return run_command(
+            lambda repository: _run_once_for_key(repository, key, request_target,
+                                                 request_hash, operation),
+            commands,
+        )
+    except ServiceUnavailable:
+        return {"error": "service_unavailable"}, 503, False
+
+
+class ServiceUnavailable(Exception):
+    """Raised by run_command() when every attempt ended in a recognized abort."""
+
+
+def run_command(work, commands: BookingUnitOfWorkProvider | None = None):
+    """Run work(repository) in one unit of work and return its result.
+
+    A TransactionAborted reruns the whole block, up to MAX_COMMAND_ATTEMPTS
+    in all; after the last one ServiceUnavailable is raised. Any other
+    exception rolls the block back and propagates at once. `commands`
+    defaults to storage.BOOKING_COMMANDS.
+    """
+    commands = storage.BOOKING_COMMANDS if commands is None else commands
     for _ in range(MAX_COMMAND_ATTEMPTS):
         try:
             with commands.unit_of_work() as repository:
-                return _run_once_for_key(repository, key, request_target,
-                                         request_hash, operation)
+                return work(repository)
         except TransactionAborted:
             continue
-    return {"error": "service_unavailable"}, 503, False
+    raise ServiceUnavailable
 
 
 def _run_once_for_key(repository, key, request_target, request_hash, operation):

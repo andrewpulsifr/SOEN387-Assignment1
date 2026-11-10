@@ -3,12 +3,21 @@
 This module imports nothing, so the rules run without storage, HTTP code or a
 clock. Callers pass in every ID and time. Availability is stated once, in
 Event.seats_left: Capacity minus confirmed Reservations minus live Holds.
-Confirming or releasing a Hold is not implemented here yet.
+Confirmation moves a live Hold's seat to a Reservation. Releasing a Hold is
+not implemented here yet.
 """
 
 
 class SoldOut(ValueError):
     """Raised by Event.book() and Event.hold() when no seat is available."""
+
+
+class HoldExpired(ValueError):
+    """Raised by Event.confirm() for a Hold whose deadline has been reached."""
+
+
+class HoldReleased(ValueError):
+    """Raised by Event.confirm() for a Hold that was released."""
 
 
 class Hold:
@@ -66,7 +75,7 @@ class Event:
 
     The caller supplies the numbers, the Holds and the observation time `now`,
     so the Event never reads storage or a clock. It judges which Holds are
-    live at `now`. book() and hold() take their IDs from the caller.
+    live at `now`. book(), hold() and confirm() take their IDs from the caller.
     """
 
     def __init__(self, event_id: str, capacity: int, confirmed_occupancy: int = 0,
@@ -116,6 +125,36 @@ class Event:
         if self.seats_left == 0:
             raise SoldOut("No seat remains")
         self._confirmed_occupancy += 1
+        return self._reservation(reservation_id, created_at)
+
+    def confirm(self, hold: Hold, reservation_id: str, created_at: str) -> dict[str, str]:
+        """Replace a live Hold's seat with a confirmed Reservation linked from the Hold.
+
+        hold may be a different copy from the one this Event loaded, such as
+        one reread from storage. Raises HoldReleased for a released Hold,
+        HoldExpired when now is at or after its deadline, and ValueError for
+        a Hold already confirmed, from another Event, or missing from this
+        Event's Holds; each leaves both objects unchanged. On success
+        hold.reservation_id is set and the
+        seat moves to confirmed occupancy, so seats_left stays the same.
+        Saving the result is the caller's job.
+        """
+        if hold.event_id != self.id or hold.reservation_id is not None:
+            raise ValueError("Only an unconfirmed Hold of this Event can be confirmed")
+        status = hold.status_at(self._now)
+        if status == "released":
+            raise HoldReleased("The Hold was released")
+        if status == "expired":
+            raise HoldExpired("The Hold's deadline has been reached")
+        if hold.id not in {other.id for other in self._holds}:
+            raise ValueError("A live Hold must be one this Event loaded")
+        hold.reservation_id = reservation_id
+        self._holds = [other for other in self._holds if other.id != hold.id]
+        self._confirmed_occupancy += 1
+        return self._reservation(reservation_id, created_at)
+
+    def _reservation(self, reservation_id: str, created_at: str) -> dict[str, str]:
+        """Return a confirmed reservation of this Event as a dict."""
         return {
             "id": reservation_id,
             "eventId": self.id,

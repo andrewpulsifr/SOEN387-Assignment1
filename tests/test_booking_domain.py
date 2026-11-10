@@ -2,9 +2,11 @@
 
 Checks Hold status and countdown just before, at and after the deadline, with
 fractional seconds rounded up; that only live Holds take seats; that hold()
-and book() share one availability rule; that overbooked starting state is
-rejected; and that the module imports nothing. The rules have no storage or
-clock, so these tests say nothing about persistence or database locking.
+and book() share one availability rule; that confirm() moves a live Hold's
+seat to a Reservation and rejects expired, released, confirmed and foreign
+Holds; that overbooked starting state is rejected; and that the module
+imports nothing. The rules have no storage or clock, so these tests say
+nothing about persistence or database locking.
 
 Run from the project root:
     python3 -m unittest discover -s tests -p 'test_booking*.py' -v
@@ -16,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import booking_domain
-from booking_domain import Event, Hold, SoldOut
+from booking_domain import Event, Hold, HoldExpired, HoldReleased, SoldOut
 
 CREATED = datetime(2026, 11, 9, 20, 0, tzinfo=timezone.utc)
 DEADLINE = CREATED + timedelta(seconds=90)
@@ -126,6 +128,58 @@ class EventTests(unittest.TestCase):
         with self.assertRaises(SoldOut):
             event.book("res_8", "2026-11-08T20:01:00Z")
         self.assertEqual(event.seats_left, 0)
+
+
+class ConfirmTests(unittest.TestCase):
+    def full_event(self, now):
+        """Return ev_103 at Capacity 2, filled by one confirmed seat and Hold hold_a."""
+        return Event("ev_103", capacity=2, confirmed_occupancy=1,
+                     holds=[held("hold_a")], now=now)
+
+    def test_confirming_a_live_hold_replaces_its_seat_with_a_linked_reservation(self):
+        """At full allocation, confirmation succeeds and seats_left stays 0."""
+        event = self.full_event(DEADLINE - timedelta(microseconds=1))
+        hold = held("hold_a")
+        reservation = event.confirm(hold, "res_9", "2026-11-08T20:00:00Z")
+        self.assertEqual(reservation, {
+            "id": "res_9", "eventId": "ev_103", "status": "confirmed",
+            "createdAt": "2026-11-08T20:00:00Z",
+        })
+        self.assertEqual(hold.reservation_id, "res_9")
+        self.assertEqual(hold.status_at(DEADLINE + timedelta(hours=1)), "confirmed")
+        self.assertEqual(event.seats_left, 0)
+
+    def test_holds_that_are_not_live_are_rejected_without_change(self):
+        """Expired at and after the deadline, or released, raise; the free seat stays free.
+
+        The released Hold is absent from the Event, as when storage loads only
+        Holds that are neither confirmed nor released.
+        """
+        for now, state, error, loaded in [
+            (DEADLINE, {}, HoldExpired, [held("hold_a")]),
+            (DEADLINE + timedelta(seconds=1), {}, HoldExpired, [held("hold_a")]),
+            (CREATED, {"released": True}, HoldReleased, []),
+        ]:
+            with self.subTest(now=now, error=error.__name__):
+                event = Event("ev_103", capacity=2, confirmed_occupancy=1,
+                              holds=loaded, now=now)
+                hold = held("hold_a", **state)
+                with self.assertRaises(error):
+                    event.confirm(hold, "res_9", "2026-11-08T20:00:00Z")
+                self.assertIsNone(hold.reservation_id)
+                self.assertEqual(event.seats_left, 1)
+
+    def test_rejects_a_confirmed_hold_or_one_this_event_does_not_hold(self):
+        """None can take a second Reservation or change this Event's seats."""
+        event = self.full_event(CREATED)
+        for hold, link in [(held("hold_a", reservation_id="res_4"), "res_4"),
+                           (Hold("hold_a", "ev_101", CREATED, DEADLINE), None),
+                           (held("hold_unknown"), None)]:
+            with self.subTest(event_id=hold.event_id, link=link):
+                with self.assertRaises(ValueError):
+                    event.confirm(hold, "res_9", "2026-11-08T20:00:00Z")
+                self.assertEqual(hold.reservation_id, link)
+                self.assertEqual(event.seats_left, 0)
 
 
 class DomainModuleTests(unittest.TestCase):

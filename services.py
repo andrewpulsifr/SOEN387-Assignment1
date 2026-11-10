@@ -13,6 +13,10 @@ import storage
 import validation
 from booking_repository import BookingRepository, BookingUnitOfWorkProvider
 
+# Every reservation, booked directly or confirmed from a Hold, reports this
+# fixed createdAt.
+RESERVATION_CREATED_AT = "2026-09-12T19:00:00Z"
+
 
 def list_events(bookable):
     """List events; bookable == "true" keeps only events with a free seat."""
@@ -82,7 +86,7 @@ def _perform_reservation(repository: BookingRepository, event_id, body_bytes,
     if event.seats_left == 0:
         return {"error": "sold_out"}, 409
     reservation = event.book(
-        repository.next_reservation_id(), "2026-09-12T19:00:00Z"
+        repository.next_reservation_id(), RESERVATION_CREATED_AT
     )
     repository.save_reservation(event, reservation)
     return reservation, 201

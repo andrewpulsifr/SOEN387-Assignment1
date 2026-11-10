@@ -3,8 +3,8 @@ info:
   title: Encore
   version: 1.2.0
   description: >
-    Campus event ticketing. v1.2 adds A2 Hold operations. Hold creation and
-    inspection are implemented; confirmation and release are planned. Existing
+    Campus event ticketing. v1.2 adds A2 Hold operations. Hold creation,
+    inspection and confirmation are implemented; release is planned. Existing
     paths and schemas retain the v1.1 contract shapes. New Hold, waitlist and
     error responses may add fields; clients should ignore unknown fields.
     The four original event checks are preserved; full released-v1.0.0
@@ -503,13 +503,13 @@ paths:
       operationId: confirmHold
       summary: Confirm a live Hold or recover its existing Reservation
       description: |
-        Planned A2 operation. No new key or client options are required; a
-        supplied key is ignored. Validate HoldId syntax, reject any query
-        parameter, then any nonempty body, before lookup (422 invalid_request).
-        Ignore Content-Type for zero body bytes. Unknown well-formed Hold IDs
-        return 404 hold_not_found. Acquire the Hold's Event lock, reread the
-        Hold, then sample fresh server time immediately before the transition.
-        Waiting past the deadline fails even if the request arrived earlier.
+        No new key or client options are required; a supplied key is ignored.
+        Validate HoldId syntax, reject any query parameter, then any nonempty
+        body, before lookup (422 invalid_request). Ignore Content-Type for zero
+        body bytes. Unknown well-formed Hold IDs return 404 hold_not_found.
+        Acquire the Hold's Event lock, reread the Hold, then sample fresh
+        server time immediately before the transition. Waiting past the
+        deadline fails even if the request arrived earlier.
 
         Live held -> 201, create one separately identified linked Reservation.
         Confirmed -> 200, return that same Reservation, even after the former

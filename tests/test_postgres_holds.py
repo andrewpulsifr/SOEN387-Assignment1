@@ -9,42 +9,22 @@ Run from the project root with ENCORE_TEST_DATABASE_URL set:
     python3 -m unittest discover -s tests -p 'test_postgres_holds.py' -v
 """
 
-import time
 import unittest
-from datetime import datetime, timedelta
+from datetime import timedelta
 from uuid import uuid4
 
-from conformance import get, post, schema_for, send
-from jsonschema import Draft202012Validator
+from conformance import get, post, send
+from hold_support import (
+    CREATE,
+    create,
+    lifetime,
+    seats_left,
+    validate,
+    wait_until_not_held,
+)
 from postgres_support import AppOnPostgresTestCase, requires_postgres
 
-CREATE = "/events/{eventId}/holds"
 UNKNOWN_HOLD = "/holds/hold_" + "0" * 32
-
-
-def create(event_id, key, body=None, content_type=None, query=""):
-    """POST a Hold request with exactly these bytes; return (status, body, headers)."""
-    headers = {} if key is None else {"Idempotency-Key": key}
-    if content_type is not None:
-        headers["Content-Type"] = content_type
-    return send("POST", f"/events/{event_id}/holds{query}", body, headers)
-
-
-def validate(path, method, status, body):
-    """Check a response body against the contract schema for that status."""
-    Draft202012Validator(schema_for(path, method, str(status)),
-                         format_checker=Draft202012Validator.FORMAT_CHECKER).validate(body)
-
-
-def lifetime(hold):
-    """Return expiresAt minus createdAt for a Hold body."""
-    return (datetime.fromisoformat(hold["expiresAt"])
-            - datetime.fromisoformat(hold["createdAt"]))
-
-
-def seats_left(event_id):
-    """Read the event's seatsLeft over HTTP."""
-    return get(f"/events/{event_id}")[1]["seatsLeft"]
 
 
 @requires_postgres
@@ -157,17 +137,6 @@ class HoldHttpTests(AppOnPostgresTestCase):
         self.assertEqual(replay[:2], sold_out[:2])
         self.assertEqual(replay[2]["Idempotency-Replayed"], "true")
 
-    def wait_until_not_held(self, hold_id, timeout=10):
-        """Poll GET until the Hold stops being held; return that response body."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            status, current, _ = send("GET", f"/holds/{hold_id}")
-            self.assertEqual(status, 200, current)
-            if current["status"] != "held":
-                return current
-            time.sleep(0.05)
-        self.fail(f"Hold {hold_id} was still held after {timeout} seconds")
-
     def test_expiry_restores_availability_at_once_and_replay_never_renews(self):
         """With a 2-second TTL, expiry frees ev_103 for every reader and both booking paths."""
         hold_key, sold_out_key = str(uuid4()), str(uuid4())
@@ -177,7 +146,7 @@ class HoldHttpTests(AppOnPostgresTestCase):
             sold_out = create("ev_103", sold_out_key)
             ana = post("/events/ev_103/waitlist", b'{"userId":"ana"}', str(uuid4()))
 
-            expired = self.wait_until_not_held(receipt["id"])
+            expired = wait_until_not_held(receipt["id"])
             seats_after_expiry = seats_left("ev_103")
             bookable = get("/events?bookable=true")[1]["events"]
             bob = post("/events/ev_103/waitlist", b'{"userId":"bob"}', str(uuid4()))

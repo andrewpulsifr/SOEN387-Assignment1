@@ -1,19 +1,22 @@
-"""Service functions for creating and inspecting Holds.
+"""Service functions for creating, inspecting and confirming Holds.
 
 Creation is a keyed command: it runs in one unit of work through
 idempotency.execute_idempotently, so the Hold and its stored outcome commit
 together. Inspection runs in one snapshot, so the Hold's state and the time
-used to judge its expiry come from the same observation. Confirming and
-releasing a Hold are not implemented yet.
+used to judge its expiry come from the same observation. Confirmation takes
+no key and stores no outcome; it runs through idempotency.run_command for
+the same retry rules, and a repeat returns the Reservation already linked.
+Releasing a Hold is not implemented yet.
 """
 
 import uuid
 from datetime import timedelta, timezone
 
 import idempotency
+import services
 import storage
 import validation
-from booking_domain import Hold, SoldOut
+from booking_domain import Hold, HoldExpired, HoldReleased, SoldOut
 from booking_repository import BookingRepository
 
 # How long a new Hold lasts. app.main() sets it from ENCORE_HOLD_TTL_SECONDS.
@@ -85,6 +88,61 @@ def get_hold(hold_id, query_args, body_bytes):
     if hold.reservation_id is not None:
         body["reservationId"] = hold.reservation_id
     return body, 200
+
+
+def confirm_hold(hold_id, query_args, body_bytes):
+    """Confirm a live Hold into a new Reservation, or return the one it already has.
+
+    Returns 201 with the new Reservation, 200 with the linked one, 404
+    hold_not_found, 409 hold_expired or hold_released, 422 invalid_request
+    for a malformed ID, any query or any body, or 503 service_unavailable.
+    The Reservation and its link commit together. A 409 raises out of the
+    unit of work, so the block rolls back, including the reservation number
+    it allocated. Neither a 409 nor a 503 changes anything, so after a 503
+    the caller can GET the Hold or confirm again.
+    """
+    try:
+        validation.validate_request("POST", "/holds/{holdId}/confirm",
+                                    {"holdId": hold_id})
+    except validation.InvalidRequest:
+        return {"error": "invalid_request"}, 422
+    if query_args or body_bytes:
+        return {"error": "invalid_request"}, 422
+
+    try:
+        return idempotency.run_command(
+            lambda repository: _perform_confirm(repository, hold_id)
+        )
+    except HoldExpired:
+        return {"error": "hold_expired"}, 409
+    except HoldReleased:
+        return {"error": "hold_released"}, 409
+    except idempotency.ServiceUnavailable:
+        return {"error": "service_unavailable"}, 503
+
+
+def _perform_confirm(repository: BookingRepository, hold_id):
+    """Find the Hold's Event, lock it, reread the Hold, then confirm or recover.
+
+    The first read only finds the Event. A confirmation that held the lock
+    first may have linked the Hold since then, so the decision uses the
+    reread. Every command that changes a Hold locks its Event first, so the
+    reread stays current until this block ends. The Event judges expiry with
+    the clock read after its lock.
+    """
+    before_lock = repository.get_hold(hold_id)
+    if before_lock is None:
+        return {"error": "hold_not_found"}, 404
+    event = repository.get_event(before_lock.event_id)
+    hold = repository.get_hold(hold_id)
+    assert event is not None and hold is not None
+    if hold.reservation_id is not None:
+        return repository.get_reservation(hold.reservation_id), 200
+
+    reservation = event.confirm(hold, repository.next_reservation_id(),
+                                services.RESERVATION_CREATED_AT)
+    repository.save_confirmation(hold, reservation)
+    return reservation, 201
 
 
 def _identity(hold: Hold):
