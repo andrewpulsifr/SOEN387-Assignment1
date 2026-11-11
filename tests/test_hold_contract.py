@@ -1,10 +1,22 @@
-"""Validate the planned Hold protocol without claiming endpoint implementation."""
+"""Check the published contract: Hold operations, v1.1 compatibility and 503 coverage.
 
+Most tests read the YAML only. The 503 test also sends every operation through
+the Flask app on an in-memory adapter whose units of work always abort, so it
+shows which handlers retry and give 503; it does not exercise PostgreSQL.
+Run: python3 -m unittest discover -s tests -p 'test_hold*.py' -v
+"""
+
+from contextlib import contextmanager
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from jsonschema import Draft202012Validator
 import yaml
+
+from app import app
+from booking_repository import TransactionAborted
+import storage
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,10 +42,13 @@ def validator(schema):
 
 class HoldContractTests(unittest.TestCase):
     def test_component_references_examples_and_legacy_contract_are_valid(self):
-        """Add Hold routes without changing legacy operation or schema contracts."""
+        """Add Hold routes; v1.1 operations change only by listing a 503 response."""
         baseline = yaml.safe_load((ROOT / 'tests/fixtures/encore-v1.1.0.yaml').read_text())
-        for path, operation in baseline['paths'].items():
-            self.assertEqual(SPEC['paths'][path], operation, path)
+        for path, operations in baseline['paths'].items():
+            for method, operation in operations.items():
+                current = SPEC['paths'][path][method]
+                responses = {k: v for k, v in current['responses'].items() if k != '503'}
+                self.assertEqual({**current, 'responses': responses}, operation, (path, method))
         for name, schema in baseline['components']['schemas'].items():
             self.assertEqual(SPEC['components']['schemas'][name], schema, name)
         for schema in SPEC['components']['schemas'].values():
@@ -141,6 +156,45 @@ class HoldContractTests(unittest.TestCase):
         validator(content['schema']).validate({**body, 'futureField': True})
         self.assertFalse(validator(content['schema']).is_valid({'error': 'already_confirmed'}))
         self.assertNotIn('content', resolve(release['responses']['204']['$ref']))
+
+    def test_every_operation_that_can_return_503_lists_it(self):
+        """Exhausted abort retries give 503, and each operation that gives it documents it."""
+        examples = {'eventId': 'ev_101', 'holdId': 'hold_' + '0' * 32,
+                    'reservationId': 'res_1', 'entryId': 'entry_1'}
+        unavailable = set()
+        with patch.object(storage, 'BOOKING_COMMANDS', AlwaysAborting(storage.BOOKING_COMMANDS)), \
+                patch.object(app.logger, 'disabled', True):
+            client = app.test_client()
+            for path, operations in SPEC['paths'].items():
+                url = path.format(**examples)
+                for method, operation in operations.items():
+                    status = client.open(url, method=method.upper(),
+                                         headers={'Idempotency-Key': 'k'}).status_code
+                    if status == 503:
+                        unavailable.add(operation['operationId'])
+                        with self.subTest(operation=operation['operationId']):
+                            self.assertEqual(operation['responses'].get('503'),
+                                             {'$ref': '#/components/responses/ServiceUnavailable'})
+        self.assertEqual(unavailable, {'createReservation', 'joinWaitlist', 'createHold',
+                                       'confirmHold', 'releaseHold'})
+
+
+class AlwaysAborting:
+    """Booking adapter whose every unit of work aborts, as if PostgreSQL kept reporting 40001."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    @contextmanager
+    def unit_of_work(self):
+        raise TransactionAborted
+        yield  # pragma: no cover
+
+    def snapshot(self):
+        return self.inner.snapshot()
+
+    def now(self):
+        return self.inner.now()
 
 
 if __name__ == '__main__':

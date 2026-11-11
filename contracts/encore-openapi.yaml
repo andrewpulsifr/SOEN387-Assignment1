@@ -1,11 +1,13 @@
 openapi: 3.1.0
 info:
   title: Encore
-  version: 1.2.0
+  version: 1.2.1
   description: >
     Campus event ticketing. v1.2 adds A2 Hold operations. Hold creation,
     inspection, confirmation and release are implemented. Existing
-    paths and schemas retain the v1.1 contract shapes. New Hold, waitlist and
+    paths and schemas retain the v1.1 contract shapes; v1.2.1 adds the 503
+    response to the keyed reservation and waitlist POSTs, which use the same
+    bounded abort retry as Hold commands. New Hold, waitlist and
     error responses may add fields; clients should ignore unknown fields.
     The four original event checks are preserved; full released-v1.0.0
     equivalence remains unverified. Hold validation and recovery rules are
@@ -145,6 +147,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
   /reservations/{reservationId}:
     get:
@@ -264,6 +267,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
     get:
       operationId: listWaitlistEntries
@@ -438,7 +442,7 @@ paths:
         "404": { $ref: "#/components/responses/HoldEventNotFound" }
         "409": { $ref: "#/components/responses/HoldSoldOut" }
         "422": { $ref: "#/components/responses/HoldInvalidRequest" }
-        "503": { $ref: "#/components/responses/HoldServiceUnavailable" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
   /holds/{holdId}:
     get:
@@ -467,7 +471,7 @@ paths:
         "200": { $ref: "#/components/responses/HoldCurrent" }
         "404": { $ref: "#/components/responses/HoldNotFound" }
         "422": { $ref: "#/components/responses/HoldInvalidOptions" }
-        "503": { $ref: "#/components/responses/HoldServiceUnavailable" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
     delete:
       operationId: releaseHold
@@ -496,7 +500,7 @@ paths:
         "404": { $ref: "#/components/responses/HoldNotFound" }
         "409": { $ref: "#/components/responses/HoldAlreadyConfirmed" }
         "422": { $ref: "#/components/responses/HoldInvalidOptions" }
-        "503": { $ref: "#/components/responses/HoldServiceUnavailable" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
   /holds/{holdId}/confirm:
     post:
@@ -529,7 +533,7 @@ paths:
         "404": { $ref: "#/components/responses/HoldNotFound" }
         "409": { $ref: "#/components/responses/HoldConfirmConflict" }
         "422": { $ref: "#/components/responses/HoldInvalidOptions" }
-        "503": { $ref: "#/components/responses/HoldServiceUnavailable" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
 components:
   schemas:
@@ -830,7 +834,7 @@ components:
             reusedKey: { value: { error: idempotency_key_reuse } }
             invalidInput: { value: { error: invalid_request } }
 
-    HoldServiceUnavailable:
+    ServiceUnavailable:
       description: >
         503 service_unavailable after bounded recognized-abort retry exhaustion.
         Never cached as a business outcome. Retry creation with the original

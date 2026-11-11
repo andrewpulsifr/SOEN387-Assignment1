@@ -18,7 +18,7 @@ runs are in `deliverables/assignment2/`.
 
 | Deliverable | Files |
 |---|---|
-| Extended contract: Holds, confirmation and coded errors | [contracts/encore-openapi.yaml](contracts/encore-openapi.yaml), version 1.2.0 |
+| Extended contract: Holds, confirmation and coded errors | [contracts/encore-openapi.yaml](contracts/encore-openapi.yaml), version 1.2.1 |
 | Domain layer: the Hold state machine and the capacity rule | `booking_domain.py`, which imports nothing |
 | Service layer | `hold_services.py` for Holds, `services.py` for events, direct booking and the waitlist, `idempotency.py` for keyed replay and retries |
 | Repository | `booking_repository.py` (the interface), `postgres_booking.py` (PostgreSQL), `memory_booking.py` (the in-memory test double) |
@@ -156,7 +156,8 @@ lost, run `python3 tests/direct_booking_smoke.py` once on freshly seeded data,
 after the original conformance suite. It uses both of ev_103's seats and one
 of ev_101's.
 
-Check the Hold contract and fresh-setup fixture without calling Hold handlers:
+Check the Hold contract, the fresh-setup fixture, and that every operation
+which can return 503 lists it in the contract:
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_hold*.py' -v
@@ -464,5 +465,6 @@ database error, including a connection lost during commit, is not retried and
 returns a server error, because the work may or may not have committed. The
 client recovers the same way: the same key replays the outcome if the work
 committed, or runs it once if it did not. No statement, lock or connection
-timeout is set. The v1.1 operation entries in the contract do not list the 503
-response yet; the Hold operations do.
+timeout is set. Reservation creation, waitlist join and the Hold commands list
+the 503 response in the contract. Leaving the waitlist runs one unit of work
+without this retry, so an abort there returns a server error.
