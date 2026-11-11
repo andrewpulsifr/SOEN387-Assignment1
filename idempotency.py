@@ -4,8 +4,8 @@ Keys share one global namespace. Each keyed command runs in one unit of work
 from the booking adapter: claiming the key, the operation's writes and the
 saved outcome commit together or not at all. The key is claimed before the
 operation locks any event. Outcomes stay replayable for 24 hours after the
-operation completes, measured on this process's UTC clock, and survive
-restarts on PostgreSQL.
+operation completes, measured on the repository's clock (the database clock on
+PostgreSQL, the same one Hold expiry uses), and survive restarts on PostgreSQL.
 
 run_command() runs each keyed command and each Hold confirmation. A command
 that the adapter reports as TransactionAborted runs again from the start, up
@@ -15,7 +15,7 @@ stored, so the same request can be retried. Other errors propagate on the
 first attempt.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 import hashlib
 
 import storage
@@ -23,11 +23,6 @@ from booking_repository import BookingUnitOfWorkProvider, TransactionAborted
 
 IDEMPOTENCY_RETENTION = timedelta(hours=24)
 MAX_COMMAND_ATTEMPTS = 3
-
-
-def utc_now():
-    """Return the current UTC time, the clock that retention is measured on."""
-    return datetime.now(timezone.utc)
 
 
 def execute_idempotently(key, body_bytes, request_target, operation,
@@ -89,7 +84,7 @@ def _run_once_for_key(repository, key, request_target, request_hash, operation):
     """
     stored = repository.claim_key(key, request_target, request_hash)
     binding_is_live = (stored is not None
-                       and utc_now() < stored["completed_at"] + IDEMPOTENCY_RETENTION)
+                       and repository.now() < stored["completed_at"] + IDEMPOTENCY_RETENTION)
     if binding_is_live:
         if (stored["request_target"] != request_target
                 or stored["request_hash"] != request_hash):
@@ -103,6 +98,6 @@ def _run_once_for_key(repository, key, request_target, request_hash, operation):
         "request_hash": request_hash,
         "status": status,
         "body": body,
-        "completed_at": utc_now(),
+        "completed_at": repository.now(),
     })
     return body, status, False

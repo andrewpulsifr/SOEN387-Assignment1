@@ -448,7 +448,8 @@ request with the same key waits on the key's row and then replays the first
 outcome.
 
 An outcome stays replayable for 24 hours after its request completed, measured
-on the API process's UTC clock, and survives a restart. At 24 hours or later
+on PostgreSQL's `clock_timestamp()` (the same clock Hold expiry uses, so every
+API process agrees on the boundary), and survives a restart. At 24 hours or later
 the key starts a new attempt. Missing-key and key-reuse errors are never
 stored.
 

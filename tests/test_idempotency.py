@@ -109,7 +109,9 @@ class IdempotencyTests(unittest.TestCase):
             clock.advance(10)
             return {'attempt': calls[-1]}, 201
 
-        with patch('idempotency.utc_now', new=clock):
+        # Retention reads the repository's clock, so the test controls it there.
+        with patch.object(type(storage.BOOKING_COMMANDS), 'now',
+                          new=lambda _repository: clock()):
             first = idempotency.execute_idempotently(
                 'expiring-key', b'{}', 'test operation', operation
             )

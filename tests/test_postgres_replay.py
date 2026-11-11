@@ -23,6 +23,12 @@ from postgres_support import ServicesOnPostgresTestCase, requires_postgres
 import idempotency
 import services
 import storage
+from postgres_booking import _PostgresRepository
+
+
+def database_clock_at(moment):
+    """Make every PostgreSQL unit of work read `moment` as the database clock."""
+    return patch.object(_PostgresRepository, "now", new=lambda _repository: moment)
 
 
 @requires_postgres
@@ -129,14 +135,12 @@ class PostgresReplayTests(ServicesOnPostgresTestCase):
     def test_binding_expires_24_hours_after_completion(self):
         """One second before expiry it replays; at equality another binding may start."""
         completed = datetime(2026, 11, 9, 12, tzinfo=timezone.utc)
-        with patch.object(idempotency, "utc_now", return_value=completed):
+        with database_clock_at(completed):
             first = services.create_reservation("ev_103", "day-key", b"", None)
-        with patch.object(idempotency, "utc_now",
-                          return_value=completed + timedelta(hours=24, seconds=-1)):
+        with database_clock_at(completed + timedelta(hours=24, seconds=-1)):
             before = services.create_reservation("ev_103", "day-key", b"", None)
             reuse = services.create_reservation("ev_101", "day-key", b"", None)
-        with patch.object(idempotency, "utc_now",
-                          return_value=completed + timedelta(hours=24)):
+        with database_clock_at(completed + timedelta(hours=24)):
             at_expiry = services.create_reservation("ev_101", "day-key", b"", None)
             replay = services.create_reservation("ev_101", "day-key", b"", None)
 
